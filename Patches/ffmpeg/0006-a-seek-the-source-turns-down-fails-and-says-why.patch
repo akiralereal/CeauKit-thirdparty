@@ -1,0 +1,68 @@
+A seek the source turns down fails, says why, and leaves things as they were
+
+Three things that together made a film end when the request a seek made
+was refused, as it is when a token has run out an hour into the film.
+
+matroska: a seek looks the place up in the index and goes to its bytes.
+Whether the bytes could be gone to was not looked at. The connection
+stayed where it was and the demuxer went on as if it stood at the
+cluster it had asked for. The seek now fails, and the generic seek that
+is tried next returns what the connection said.
+
+http: the answer that refuses a request has a length of its own, zero as
+a rule, and that was kept as the length of the file. Every seek after it
+lay "past the end", was granted without a request being made, and the
+next read was the end of the file. The length is put back with the rest
+of what a failed seek puts back.
+
+http: a 401 to a request for a part of a file was reported as an
+"unexpected offset", an input/output error, because the answer names no
+part. It is reported as the status it is.
+
+--- a/libavformat/http.c	2026-11-14 02:22:14
++++ b/libavformat/http.c	2026-11-14 02:22:14
+@@ -1738,7 +1738,9 @@
+     if (s->new_location)
+         s->off = off;
+ 
+-    if (off != s->off) {
++    /* A request that was turned down for want of credentials has no
++     * offset to compare. The caller looks at the status, and says that. */
++    if (off != s->off && s->http_code != 401 && s->http_code != 407) {
+         av_log(h, AV_LOG_ERROR,
+                "Unexpected offset: expected %"PRIu64", got %"PRIu64"\n",
+                off, s->off);
+@@ -2140,6 +2142,7 @@
+     HTTPContext *s = h->priv_data;
+     URLContext *old_hd = NULL;
+     uint64_t old_off = s->off;
++    uint64_t old_filesize = s->filesize;
+     uint8_t old_buf[BUFFER_SIZE];
+     int old_buf_size, ret;
+     AVDictionary *options = NULL;
+@@ -2231,6 +2234,9 @@
+             s->hd      = old_hd;
+             s->off     = old_off;
+         }
++        /* The answer that turned the request down had a length of its
++         * own, which is not the file's. */
++        s->filesize = old_filesize;
+         av_dict_free(&options);
+         return ret;
+     }
+--- a/libavformat/matroskadec.c	2026-11-14 02:14:38
++++ b/libavformat/matroskadec.c	2026-11-14 02:14:38
+@@ -4540,7 +4540,12 @@
+     }
+ 
+     /* We seek to a level 1 element, so set the appropriate status. */
+-    matroska_reset_status(matroska, 0, sti->index_entries[index].pos);
++    if (matroska_reset_status(matroska, 0, sti->index_entries[index].pos) < 0) {
++        /* The bytes of that place could not be had, and the reader stands
++         * where it stood. Saying the seek went through would have what
++         * comes next read as if it were the cluster that was asked for. */
++        goto err;
++    }
+     if (flags & AVSEEK_FLAG_ANY) {
+         sti->skip_to_keyframe = 0;
+         matroska->skip_to_timecode = timestamp;

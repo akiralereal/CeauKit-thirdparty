@@ -1,0 +1,161 @@
+hls: a seek past a discontinuity finds its place
+
+After a seek the reader opens the segment the time falls in, which it
+finds by adding up the lengths of the segments before it, and then lets
+go of every packet whose timestamp is below the time asked for. Where a
+stream's timestamps start again at an EXT-X-DISCONTINUITY, as they do in
+a film stitched together from parts, the packets of every later part
+have timestamps that say nothing of their place in the playlist. They
+were all below the time asked for, all let go of, and the seek ended at
+the end of the file.
+
+The reader now counts the discontinuities before each segment. A seek in
+a complete playlist that lands past one takes the first packet it reads
+there as the start of that segment, which it is, and from then on moves
+every timestamp by the difference: for the comparison, and for the
+caller, who asked for a time and now gets packets at that time. One
+shift serves all the playlists of a presentation, which restart
+together. A seek to before the first discontinuity is as it was.
+
+--- a/libavformat/hls.c
++++ b/libavformat/hls.c
+@@ -84,6 +84,8 @@
+     uint8_t iv[16];
+     /* associated Media Initialization Section, treated as a segment */
+     struct segment *init_section;
++    /* how many EXT-X-DISCONTINUITY tags the playlist has up to here */
++    int discontinuities;
+ };
+ 
+ struct rendition;
+@@ -163,6 +165,9 @@
+      * c->first_timestamp. */
+     int64_t ts_offset;
+     int64_t seek_timestamp;
++    /* start of the segment the last seek put this playlist on, in the
++     * playlist's own time, or AV_NOPTS_VALUE */
++    int64_t seek_segment_start;
+     int seek_flags;
+     int seek_stream_index; /* into subdemuxer stream array */
+ 
+@@ -233,6 +238,11 @@
+     int64_t first_timestamp;
+     struct playlist *first_timestamp_pls;
+     int64_t cur_timestamp;
++    /* After a seek past a discontinuity: what is added to every timestamp
++     * to put it on the playlist's own time, and whether it is still to be
++     * measured from the first packet read. */
++    int64_t seek_shift;
++    int seek_shift_pending;
+     AVIOInterruptCB *interrupt_callback;
+     AVDictionary *avio_opts;
+     AVDictionary *seg_format_opts;
+@@ -355,6 +365,7 @@
+     av_strlcpy(pls->url, abs_url, sizeof(pls->url));
+     pls->ts_offset = AV_NOPTS_VALUE;
+     pls->seek_timestamp = AV_NOPTS_VALUE;
++    pls->seek_segment_start = AV_NOPTS_VALUE;
+ 
+     pls->is_id3_timestamped = -1;
+     pls->id3_mpegts_timestamp = AV_NOPTS_VALUE;
+@@ -827,6 +838,7 @@
+     int close_in = 0;
+     int64_t seg_offset = 0;
+     int64_t seg_size = -1;
++    int discontinuities = 0;
+     uint8_t *new_url = NULL;
+     struct variant_info variant_info;
+     char tmp_str[MAX_URL_SIZE];
+@@ -1014,6 +1026,8 @@
+         } else if (av_strstart(line, "#EXT-X-ENDLIST", &ptr)) {
+             if (pls)
+                 pls->finished = 1;
++        } else if (av_strstart(line, "#EXT-X-DISCONTINUITY", &ptr) && *ptr != '-') {
++            discontinuities++;
+         } else if (av_strstart(line, "#EXTINF:", &ptr)) {
+             double d = atof(ptr) * AV_TIME_BASE;
+             if (d < 0 || d > INT64_MAX || isnan(d)) {
+@@ -1107,6 +1121,7 @@
+                     duration = 0.001 * AV_TIME_BASE;
+                 }
+                 seg->duration = duration;
++                seg->discontinuities = discontinuities;
+                 seg->key_type = key_type;
+                 dynarray_add(&pls->segments, &pls->n_segments, seg);
+                 is_segment = 0;
+@@ -2753,6 +2768,20 @@
+                     memcpy(c->crypto_ctx.iv, seg->iv, sizeof(seg->iv));
+                     memcpy(c->crypto_ctx.key, pls->key, sizeof(pls->key));
+                     ff_hls_senc_decrypt_frame(codec_id, &c->crypto_ctx, pls->pkt);
++                }
++
++                /* The first packet read after a seek past a discontinuity is
++                 * the first of the segment the seek went to, and says what
++                 * clock the stream is on there. Whichever playlist gets to
++                 * it first sets the shift for all: they restart together. */
++                if (c->seek_shift_pending && pls->pkt->dts != AV_NOPTS_VALUE &&
++                    pls->seek_segment_start != AV_NOPTS_VALUE) {
++                    c->seek_shift = pls->seek_segment_start +
++                        (pls->ts_offset != AV_NOPTS_VALUE ? pls->ts_offset : 0) -
++                        av_rescale_q(pls->pkt->dts, get_timebase(pls), AV_TIME_BASE_Q);
++                    c->seek_shift_pending = 0;
++                    av_log(s, AV_LOG_VERBOSE, "seek past a discontinuity: timestamps shifted by %"PRId64"\n",
++                           c->seek_shift);
+                 }
+ 
+                 if (pls->seek_timestamp == AV_NOPTS_VALUE)
+@@ -2768,8 +2797,8 @@
+ 
+                     tb = get_timebase(pls);
+                     ts_diff = av_rescale_rnd(pls->pkt->dts, AV_TIME_BASE,
+-                                            tb.den, AV_ROUND_DOWN) -
+-                            pls->seek_timestamp;
++                                            tb.den, AV_ROUND_DOWN) +
++                            c->seek_shift - pls->seek_timestamp;
+                     if (ts_diff >= 0 && (pls->seek_flags  & AVSEEK_FLAG_ANY ||
+                                         pls->pkt->flags & AV_PKT_FLAG_KEY)) {
+                         pls->seek_timestamp = AV_NOPTS_VALUE;
+@@ -2856,6 +2885,14 @@
+         av_packet_move_ref(pkt, pls->pkt);
+         pkt->stream_index = st->index;
+ 
++        if (c->seek_shift) {
++            int64_t shift = av_rescale_q(c->seek_shift, AV_TIME_BASE_Q, ist->time_base);
++            if (pkt->dts != AV_NOPTS_VALUE)
++                pkt->dts += shift;
++            if (pkt->pts != AV_NOPTS_VALUE)
++                pkt->pts += shift;
++        }
++
+         if (pkt->dts != AV_NOPTS_VALUE)
+             c->cur_timestamp = av_rescale_q(pkt->dts,
+                                             ist->time_base,
+@@ -2928,6 +2965,18 @@
+     seek_pls->cur_seq_no = seq_no;
+     seek_pls->seek_stream_index = stream_subdemuxer_index;
+ 
++    /* Past a discontinuity the stream's timestamps may have started again,
++     * and say nothing of where in the playlist a packet is: compared with
++     * the time asked for, every packet from here to the end would be let go
++     * of. In a playlist that is complete, the place of each segment is known
++     * from the lengths of those before it, so the timestamps found there are
++     * moved onto the playlist's time, for this comparison and for the
++     * caller, who asked for a time and gets packets at that time. */
++    c->seek_shift = 0;
++    c->seek_shift_pending = seek_pls->finished &&
++        seek_pls->segments[seq_no - seek_pls->start_seq_no]->discontinuities > 0;
++    seek_pls->seek_segment_start = seg_start_ts;
++
+     /* Reset PTS wrap detection so backward seeks don't get misinterpreted
+      * as a forward PTS wrap. */
+     for (i = 0; i < (int)s->nb_streams; i++)
+@@ -2973,7 +3022,8 @@
+ 
+         if (pls != seek_pls) {
+             /* set closest segment seq_no for playlists not handled above */
+-            find_timestamp_in_playlist(c, pls, seek_timestamp, &pls->cur_seq_no, NULL);
++            pls->seek_segment_start = AV_NOPTS_VALUE;
++            find_timestamp_in_playlist(c, pls, seek_timestamp, &pls->cur_seq_no, &pls->seek_segment_start);
+             /* seek the playlist to the given position without taking
+              * keyframes into account since this playlist does not have the
+              * specified stream where we should look for the keyframes */

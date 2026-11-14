@@ -1,0 +1,86 @@
+hls: a segment in hand is read under its own number
+
+A reader of a live playlist falls behind it when whoever reads from the
+reader stops for a while: a player that is paused, or one whose queues
+are full. It then finds the segments it wanted gone from the list, and
+goes on at the first one the list still has, "skipping N segments
+ahead, expired from playlists". Between two segments that is as it
+should be.
+
+It also happened in the middle of one. With a connection kept for the
+next request, input_read_done says that the input in hand has been read
+to its end. Since the reading was divided into reload_playlist() and
+read_data_continuous(), the flag is no longer cleared where the next
+segment is opened but at the top of the call after that one, and before
+it is cleared that call looks at the playlist as if a segment were about
+to be opened. So the playlist was read again at the second read of
+every segment. If the list had by then moved on past the segment being
+read, that segment was counted as the one the list now began with, and
+the one after that was asked for next: a segment that was on the list
+was never read, and every byte range, key and discontinuity from there
+on was looked up under a number one too high for the bytes in hand.
+
+A viewer who paused a live channel for longer than its list reaches
+back, and played on, lost segments that were still listed, one each
+time the reader came to the end of a segment that had left the list.
+The smaller the segments, the surer: one of 32 kB or less is in hand
+whole at its second read.
+
+The flag is cleared where the segment's input is put in place, as it
+was before the division, and the playlist is read again only between
+segments.
+
+Between segments there was a second way to the same end. Where the
+server speaks HTTP/1.1, the segment after the one being read is asked
+for ahead of time, over a second connection. When the list is then
+found to have moved on, that answer was still taken as the next input,
+and read as the list's first segment. It is let go of, as is the
+connection kept open to read on in the same file, which the list's
+first segment need not be in.
+
+--- a/libavformat/hls.c
++++ b/libavformat/hls.c
+@@ -1800,6 +1800,16 @@
+                    "skipping %"PRId64" segments ahead, expired from playlists\n",
+                    v->start_seq_no - v->cur_seq_no);
+             v->cur_seq_no = v->start_seq_no;
++            /* What was got ready for the segment after the last one is
++             * not for the one the list begins with: the answer to a
++             * request made ahead of time would be read as that segment,
++             * and a connection kept to read on in the same file may be
++             * to another file. */
++            if (v->input_next_requested) {
++                ff_format_io_close(v->parent, &v->input_next);
++                v->input_next_requested = 0;
++            }
++            v->input_reuse = 0;
+         }
+         if (v->cur_seq_no > v->last_seq_no) {
+             v->last_seq_no = v->cur_seq_no;
+@@ -1837,14 +1847,6 @@
+     int segment_retries = 0;
+     struct segment *seg;
+ 
+-    if (c->http_persistent && v->input_read_done) {
+-        ret = reload_playlist(v, c);
+-        if (ret < 0)
+-            return ret;
+-    }
+-
+-    v->input_read_done = 0;
+-
+ restart:
+     ret = reload_playlist(v, c);
+     if (ret < 0)
+@@ -1885,6 +1887,11 @@
+         }
+         segment_retries = 0;
+         just_opened = 1;
++        /* The input now in hand is this segment's, with all of it still
++         * to be read. Until it has been, the playlist is left alone:
++         * read again, it may have moved on past this segment, which
++         * would then be counted as the one the list begins with. */
++        v->input_read_done = 0;
+     }
+ 
+     if (c->http_multiple == -1) {

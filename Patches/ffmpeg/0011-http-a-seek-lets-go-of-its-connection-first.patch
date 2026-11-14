@@ -1,0 +1,133 @@
+http: a seek lets go of its connection before it makes the next
+
+A seek to bytes that are not at hand makes a new connection, for the
+bytes of the new place. The connection before it was kept until the new
+one had answered, so that reading could go on over it if the answer was
+a refusal. For as long as that took, a request and the wait for its
+headers, the source had two connections from the same client, and three
+where a demuxer goes to the end of a file for its index and comes back
+before the source has seen the first one go.
+
+A source that allows a client one connection, as the gateways of IPTV
+providers and the accounts of some media servers do, turns the second
+one down, which fails the seek, or drops the first.
+
+The connection in hand is now closed first. What it was kept for is
+done another way. When the request for the new place is turned down,
+the reader stays where it was, as before, but with no connection, and
+one is made for that place when the reader is next read from. The few
+bytes that had been taken off the old connection ahead of the reader
+are asked for again with it. If the source is still refusing then, the
+read fails with what the source said, where it used to go on over the
+old connection for as long as that lasted.
+
+A forced reconnection, which is what a read does when its connection
+has broken, goes the same way as before: it had nothing to fall back
+on, and its caller asks again.
+
+--- a/libavformat/http.c
++++ b/libavformat/http.c
+@@ -159,6 +159,9 @@
+     int64_t sum_latency; /* divide by nb_requests */
+     int64_t max_latency;
+     int max_redirects;
++    /* A seek let go of the connection and could not make the one it asked
++     * for. The next read makes one for the place the reader stayed at. */
++    int reopen_at_read;
+ } HTTPContext;
+ 
+ #define OFFSET(x) offsetof(HTTPContext, x)
+@@ -1895,8 +1898,21 @@
+     int reconnect_delay_total = 0;
+     int conn_attempts = 1;
+ 
+-    if (!s->hd)
+-        return s->off < s->filesize ? AVERROR(EIO) : AVERROR_EOF;
++    if (!s->hd) {
++        AVDictionary *options = NULL;
++
++        if (s->off >= s->filesize)
++            return AVERROR_EOF;
++        if (!s->reopen_at_read)
++            return AVERROR(EIO);
++        /* A seek that the source turned down left the reader where it
++         * was, and without the connection it had there. */
++        s->reopen_at_read = 0;
++        err = http_open_cnx(h, &options);
++        av_dict_free(&options);
++        if (err < 0)
++            return err;
++    }
+ 
+     if (s->end_chunked_post && !s->end_header) {
+         err = http_read_header(h);
+@@ -2156,10 +2172,8 @@
+ static int64_t http_seek_internal(URLContext *h, int64_t off, int whence, int force_reconnect)
+ {
+     HTTPContext *s = h->priv_data;
+-    URLContext *old_hd = NULL;
+     uint64_t old_off = s->off;
+     uint64_t old_filesize = s->filesize;
+-    uint8_t old_buf[BUFFER_SIZE];
+     int old_buf_size, ret;
+     AVDictionary *options = NULL;
+     uint8_t discard[4096];
+@@ -2201,9 +2215,7 @@
+         s->location = new_uri;
+     }
+ 
+-    /* we save the old context in case the seek fails */
+     old_buf_size = s->buf_end - s->buf_ptr;
+-    memcpy(old_buf, s->buf_ptr, old_buf_size);
+ 
+     /* try to reuse existing connection for small seeks */
+     int short_seek = ffurl_get_short_seek(h);
+@@ -2233,23 +2245,26 @@
+         } else {
+             /* fall back to normal reconnection */
+             ffurl_closep(&s->hd);
+-            old_hd = NULL;
+         }
+     } else {
+-        /* can't soft seek; always open new connection */
+-        old_hd = s->hd;
+-        s->hd = NULL;
++        /* can't soft seek; always open new connection. The one in hand
++         * is let go of first: kept until the new one had answered, it
++         * made two to the same source for as long as that took, and a
++         * source that allows a client one connection turns the second
++         * down, or drops the first. */
++        ffurl_closep(&s->hd);
+     }
+ 
+     if ((ret = http_open_cnx(h, &options)) < 0) {
+-        /* if it fails, continue on old connection if possible */
+-        if (old_hd) {
+-            memcpy(s->buffer, old_buf, old_buf_size);
+-            s->buf_ptr = s->buffer;
+-            s->buf_end = s->buffer + old_buf_size;
+-            s->hd      = old_hd;
+-            s->off     = old_off;
+-        }
++        /* The reader stays where it was. There is no connection left to
++         * go on reading over, so one is made at the next read; what had
++         * been taken off the old one ahead of the reader comes again
++         * with it. A connection that had broken, which is what a forced
++         * reconnection finds, is asked for again by its caller. */
++        s->buf_ptr        = s->buffer;
++        s->buf_end        = s->buffer;
++        s->off            = old_off;
++        s->reopen_at_read = !force_reconnect;
+         /* The answer that turned the request down had a length of its
+          * own, which is not the file's. */
+         s->filesize = old_filesize;
+@@ -2258,8 +2273,8 @@
+     }
+ 
+ done:
++    s->reopen_at_read = 0;
+     av_dict_free(&options);
+-    ffurl_close(old_hd);
+     return off;
+ }
+ 

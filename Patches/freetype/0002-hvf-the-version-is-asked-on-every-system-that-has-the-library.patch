@@ -1,0 +1,33 @@
+hvf: ask the system's version on tvOS, watchOS and visionOS too
+
+Apple's HVF library came with macOS 15.4, iOS 18.4, tvOS 18.4, watchOS
+11.4 and visionOS 2.4, which is what `hvf/Scaler.h' says of each of its
+functions. The driver asks the system's version before every call into
+it, through one macro, and that macro named macOS and iOS alone. For a
+system it does not name, the `*' at its end stands for "any version":
+the compiler makes no check for tvOS or visionOS and calls straight
+through. Built for tvOS 17 the library is linked weakly, so on tvOS 17.0
+to 18.3 its functions are null, and the first font with an `hvgl' table
+calls one of them.
+
+The macro names all five systems now, with the versions the header
+gives. On a system older than its library the driver declines such a
+font, as it does on an older iOS.
+
+--- a/src/hvf/hvfobjs.h
++++ b/src/hvf/hvfobjs.h
+@@ -92,7 +92,13 @@
+   /* BEWARE: Only use this as `if ( HVS_IS_AVAILABLE ) ...`   */
+   /*         Any deviation from this form (also including     */
+   /*         negation) causes `clang` to emit a warning.      */
+-#define HVF_IS_AVAILABLE  __builtin_available( macOS 15.4, iOS 18.4, * )
++  /*                                                          */
++  /* Every system `hvf/Scaler.h` names is named here.  For a  */
++  /* system that is not, `*` holds whatever its version, and  */
++  /* no check is made at all.                                 */
++#define HVF_IS_AVAILABLE                                        \
++          __builtin_available( macOS 15.4, iOS 18.4, tvOS 18.4, \
++                               watchOS 11.4, visionOS 2.4, * )
+ 
+ #else
+ 

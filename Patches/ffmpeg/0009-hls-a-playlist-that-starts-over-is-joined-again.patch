@@ -1,0 +1,125 @@
+hls: a playlist that starts over is joined again
+
+A live playlist moves forward: each time it is fetched it begins with
+the same sequence number or a higher one. When the origin behind it is
+started again, it counts its segments from where it pleases, as a rule
+from nought, and its timestamps start over with them.
+
+The reader was waiting for the segment after the last one it read, by
+number. In the new list that number is days away. It logged that the
+sequence had changed unexpectedly and went on fetching the playlist,
+max_reload times, which with six-second segments is five minutes, and
+then took the stream to have ended. All that while the channel was on
+the air again.
+
+A list that has merely fallen behind, as that of one server among
+several may, still reaches the number the list before it began with. A
+list whose segments all lie before that number is another list. The
+reader now keeps the number the list began with when it last listed
+anything, so that an answer without segments in between does not hide
+the change, and joins a list that ends before it where a reader opening
+it at that moment would: live_start_index from its end.
+
+The timestamps of the new segments are far below the first ones the
+reader saw, and were taken for a counter that had gone round: in a
+transport stream every one of them had 2^33 added, twenty-six and a half
+hours. Once a list has started over, timestamps are passed on as they
+come, and the caller sees them go back, which is what they did.
+
+--- a/libavformat/hls.c
++++ b/libavformat/hls.c
+@@ -133,6 +133,8 @@
+     int broken;
+     int64_t cur_seq_no;
+     int64_t last_seq_no;
++    /* the number the list began with when it last listed anything */
++    int64_t listed_seq_no;
+     int m3u8_hold_counters;
+     int64_t cur_seg_offset;
+     int64_t last_load_time;
+@@ -1160,8 +1162,11 @@
+         free_segment_dynarray(prev_segments, prev_n_segments);
+         av_freep(&prev_segments);
+     }
+-    if (pls)
++    if (pls) {
+         pls->last_load_time = av_gettime_relative();
++        if (pls->n_segments > 0)
++            pls->listed_seq_no = pls->start_seq_no;
++    }
+ 
+ fail:
+     av_free(new_url);
+@@ -1691,6 +1696,54 @@
+ 
+     /* some streams were not discarded but all the programs were */
+     return 0;
++}
++
++/* An origin that starts over numbers its segments from where it pleases,
++ * as a rule from nought, and the reader is left waiting for a number that
++ * the new list will not reach for days: it asked max_reload times and then
++ * took the stream to have ended.
++ *
++ * A list that has only fallen behind, as that of one server among several
++ * may, still reaches where the list before it began. One whose segments
++ * all lie before that is another list, and is joined where a reader that
++ * opened it now would join it.
++ *
++ * The timestamps start over with the numbers. A timestamp far below the
++ * first one that was read is otherwise taken for a counter that has gone
++ * round, and has a round added to it, which in a transport stream is
++ * twenty-six hours. From here on timestamps are passed on as they come. */
++static void join_restarted_playlist(HLSContext *c, struct playlist *v)
++{
++    AVFormatContext *contexts[2] = { v->parent, v->ctx };
++    int64_t waited_for = v->cur_seq_no;
++
++    v->cur_seq_no = v->start_seq_no + (c->live_start_index < 0 ?
++        FFMAX(v->n_segments + c->live_start_index, 0) :
++        FFMIN(c->live_start_index, v->n_segments - 1));
++    v->last_seq_no = v->cur_seq_no;
++    v->m3u8_hold_counters = 0;
++    c->cur_seq_no = v->cur_seq_no;
++
++    /* What was asked for ahead of time is a segment of the old list. */
++    ff_format_io_close(v->parent, &v->input_next);
++    v->input_next_requested = 0;
++    v->input_reuse = 0;
++
++    for (int i = 0; i < 2; i++) {
++        AVFormatContext *s = contexts[i];
++        if (!s)
++            continue;
++        for (unsigned j = 0; j < s->nb_streams; j++)
++            ffstream(s->streams[j])->pts_wrap_behavior = AV_PTS_WRAP_IGNORE;
++        for (unsigned j = 0; j < s->nb_programs; j++)
++            s->programs[j]->pts_wrap_behavior = AV_PTS_WRAP_IGNORE;
++    }
++
++    av_log(v->parent, AV_LOG_WARNING,
++           "playlist %d has started over: it ends at segment %"PRId64
++           " and segment %"PRId64" was waited for, carrying on at %"PRId64"\n",
++           v->index, v->start_seq_no + v->n_segments - 1, waited_for,
++           v->cur_seq_no);
+ }
+ 
+ static int reload_playlist(struct playlist *v, HLSContext *c)
+@@ -1726,12 +1779,17 @@
+             return AVERROR_EOF;
+         if (!v->finished &&
+             av_gettime_relative() - v->last_load_time >= reload_interval) {
++            int64_t listed_seq_no = v->listed_seq_no;
+             if ((ret = parse_playlist(c, v->url, v, NULL)) < 0) {
+                 if (ret != AVERROR_EXIT)
+                     av_log(v->parent, AV_LOG_WARNING, "Failed to reload playlist %d\n",
+                            v->index);
+                 return ret;
+             }
++            if (v->n_segments > 0 &&
++                v->start_seq_no + v->n_segments < listed_seq_no &&
++                v->cur_seq_no >= v->start_seq_no + v->n_segments)
++                join_restarted_playlist(c, v);
+             /* If we need to reload the playlist again below (if
+              * there's still no more segments), switch to a reload
+              * interval of half the target duration. */

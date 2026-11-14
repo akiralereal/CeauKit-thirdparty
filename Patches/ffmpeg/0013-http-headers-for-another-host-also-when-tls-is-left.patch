@@ -1,0 +1,45 @@
+http: what is set aside for another host is also sent when a redirect leaves TLS
+
+`headers_elsewhere` states what to send in place of `headers` once a
+redirect has led to a host of another name: the same headers less the
+ones that say who is asking. A redirect on the same host was left
+alone, whatever it did to the scheme.
+
+One of those is not harmless. A server asked over HTTPS that answers
+with a redirect to itself over plain HTTP has the token, the password
+or the cookie that was written to go where nobody could read it sent
+again where anybody on the way can. From HTTPS to HTTP on the same
+host the headers set aside now take the place of `headers` too, and
+keep it for the rest of the connection's life, as after a change of
+host. From HTTP to HTTPS, and to another port, nothing changes.
+
+--- a/libavformat/http.c	2026-11-14 15:19:21
++++ b/libavformat/http.c	2026-11-14 15:19:41
+@@ -405,18 +405,23 @@
+ 
+ /* Custom headers are written for the host that is asked. When that host
+  * sends the request on to another one, what the caller set aside for other
+- * hosts takes their place, for as long as this connection lasts. */
++ * hosts takes their place, for as long as this connection lasts. The same
++ * when it sends a request that was made over TLS on to itself without TLS:
++ * what was written to be sent where nobody could read it is not sent where
++ * anybody on the way can. */
+ static int http_leave_host(HTTPContext *s, const char *from, const char *to)
+ {
++    char proto_from[16], proto_to[16];
+     char host_from[1024], host_to[1024];
+     char *elsewhere;
+     size_t len;
+ 
+     if (!s->headers_elsewhere)
+         return 0;
+-    av_url_split(NULL, 0, NULL, 0, host_from, sizeof(host_from), NULL, NULL, 0, from);
+-    av_url_split(NULL, 0, NULL, 0, host_to, sizeof(host_to), NULL, NULL, 0, to);
+-    if (!av_strcasecmp(host_from, host_to))
++    av_url_split(proto_from, sizeof(proto_from), NULL, 0, host_from, sizeof(host_from), NULL, NULL, 0, from);
++    av_url_split(proto_to, sizeof(proto_to), NULL, 0, host_to, sizeof(host_to), NULL, NULL, 0, to);
++    if (!av_strcasecmp(host_from, host_to) &&
++        !(!av_strcasecmp(proto_from, "https") && !av_strcasecmp(proto_to, "http")))
+         return 0;
+ 
+     len = strlen(s->headers_elsewhere);

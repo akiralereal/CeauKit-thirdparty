@@ -1,0 +1,68 @@
+http: a proxy given as an option holds, and its 407 has a code of its own
+
+Two things a player that states a proxy per media needs.
+
+A proxy set with the `http_proxy` option was still skipped for a host
+that the `no_proxy` environment variable lists. The variable is there to
+qualify the `http_proxy` variable; an option is for the connection it is
+set on. With this, only a proxy that came from the environment is
+subject to it.
+
+A proxy that wants a name and a password answered 407, which came out as
+AVERROR_HTTP_OTHER_4XX and could not be told from any other refusal. It
+is AVERROR_HTTP_PROXY_AUTH_REQUIRED now.
+
+--- a/libavformat/http.c	2026-11-13 19:30:44
++++ b/libavformat/http.c	2026-11-13 19:30:44
+@@ -253,7 +253,9 @@
+     proxy_path = s->http_proxy ? s->http_proxy : env_http_proxy;
+ 
+     env_no_proxy = getenv_utf8("no_proxy");
+-    use_proxy  = !ff_http_match_no_proxy(env_no_proxy, hostname) &&
++    /* A proxy given as an option is for this connection, whatever the
++     * environment excludes. */
++    use_proxy  = (s->http_proxy || !ff_http_match_no_proxy(env_no_proxy, hostname)) &&
+                  proxy_path && av_strstart(proxy_path, "http://", NULL);
+     freeenv_utf8(env_no_proxy);
+ 
+@@ -597,6 +599,7 @@
+         case 401: return AVERROR_HTTP_UNAUTHORIZED;
+         case 403: return AVERROR_HTTP_FORBIDDEN;
+         case 404: return AVERROR_HTTP_NOT_FOUND;
++        case 407: return AVERROR_HTTP_PROXY_AUTH_REQUIRED;
+         case 429: return AVERROR_HTTP_TOO_MANY_REQUESTS;
+         default: break;
+     }
+--- a/libavformat/tls.c	2026-11-13 19:30:44
++++ b/libavformat/tls.c	2026-11-13 19:30:44
+@@ -88,7 +88,9 @@
+     proxy_path = c->http_proxy ? c->http_proxy : env_http_proxy;
+ 
+     env_no_proxy = getenv_utf8("no_proxy");
+-    use_proxy = !ff_http_match_no_proxy(env_no_proxy, c->underlying_host) &&
++    /* A proxy given as an option is for this connection, whatever the
++     * environment excludes. */
++    use_proxy = (c->http_proxy || !ff_http_match_no_proxy(env_no_proxy, c->underlying_host)) &&
+                 proxy_path && av_strstart(proxy_path, "http://", NULL);
+     freeenv_utf8(env_no_proxy);
+ 
+--- a/libavutil/error.c	2026-11-13 19:30:44
++++ b/libavutil/error.c	2026-11-13 19:30:44
+@@ -54,6 +54,7 @@
+     E(HTTP_UNAUTHORIZED,        "Server returned 401 Unauthorized (authorization failed)")      \
+     E(HTTP_FORBIDDEN,           "Server returned 403 Forbidden (access denied)")                \
+     E(HTTP_NOT_FOUND,           "Server returned 404 Not Found")                                \
++    E(HTTP_PROXY_AUTH_REQUIRED, "Proxy returned 407 Proxy Authentication Required")             \
+     E(HTTP_TOO_MANY_REQUESTS,   "Server returned 429 Too Many Requests")                        \
+     E(HTTP_OTHER_4XX,           "Server returned 4XX Client Error, but not one of 40{0,1,3,4}") \
+     E(HTTP_SERVER_ERROR,        "Server returned 5XX Server Error reply")                       \
+--- a/libavutil/error.h	2026-11-13 19:30:44
++++ b/libavutil/error.h	2026-11-13 19:30:44
+@@ -79,6 +79,7 @@
+ #define AVERROR_HTTP_UNAUTHORIZED  FFERRTAG(0xF8,'4','0','1')
+ #define AVERROR_HTTP_FORBIDDEN     FFERRTAG(0xF8,'4','0','3')
+ #define AVERROR_HTTP_NOT_FOUND     FFERRTAG(0xF8,'4','0','4')
++#define AVERROR_HTTP_PROXY_AUTH_REQUIRED FFERRTAG(0xF8,'4','0','7')
+ #define AVERROR_HTTP_TOO_MANY_REQUESTS FFERRTAG(0xF8,'4','2','9')
+ #define AVERROR_HTTP_OTHER_4XX     FFERRTAG(0xF8,'4','X','X')
+ #define AVERROR_HTTP_SERVER_ERROR  FFERRTAG(0xF8,'5','X','X')

@@ -1,0 +1,93 @@
+font: find a named instance of a variable font by its PostScript name
+
+A font provider hands over a file and the PostScript name of the font it
+means in it, and the face is found by comparing that name with each
+face's own. A variable font holds several named fonts in one face, its
+weights most often, and only one of them, the default, gives the face
+its name. Asked for any other, libass said the font was not in the file.
+
+The fonts Apple's systems draw Chinese with are such a file since 2025:
+"PingFang SC" is one face, called PingFangSC-Medium, and Regular, Light,
+Semibold are named instances of it. Core Text answers a request for
+Chinese with PingFangSC-Regular, which was not found; what was drawn in
+the end was the Medium a later attempt happened on.
+
+Each face's named instances are now looked through as well, and the face
+is set to the one that carries the name.
+
+--- a/libass/ass_font.c
++++ b/libass/ass_font.c
+@@ -25,6 +25,8 @@
+ #include FT_SYNTHESIS_H
+ #include FT_GLYPH_H
+ #include FT_TRUETYPE_TABLES_H
++#include FT_MULTIPLE_MASTERS_H
++#include FT_SFNT_NAMES_H
+ #include FT_OUTLINE_H
+ #include FT_TRUETYPE_IDS_H
+ #include FT_TYPE1_TABLES_H
+@@ -322,6 +324,54 @@
+     }
+ }
+ 
++/*
++ * Whether entry `name_id` of the face's name table reads `wanted`. PostScript
++ * names are ASCII, stored one byte a letter or, for most platforms, two.
++ */
++static bool sfnt_name_is(FT_Face face, FT_UInt name_id, const char *wanted)
++{
++    size_t len = strlen(wanted);
++    FT_UInt count = FT_Get_Sfnt_Name_Count(face);
++    for (FT_UInt i = 0; i < count; i++) {
++        FT_SfntName name;
++        if (FT_Get_Sfnt_Name(face, i, &name) || name.name_id != name_id)
++            continue;
++        if (name.string_len == len && !memcmp(name.string, wanted, len))
++            return true;
++        if (name.string_len == 2 * len) {
++            size_t k = 0;
++            while (k < len && !name.string[2 * k] &&
++                   name.string[2 * k + 1] == (FT_Byte) wanted[k])
++                k++;
++            if (k == len)
++                return true;
++        }
++    }
++    return false;
++}
++
++/*
++ * A variable font holds several named fonts in one face: its weights, most
++ * often. Each has a PostScript name of its own, and that is the name a font
++ * provider hands over. If one of the face's named instances is called
++ * `postscript_name`, the face is set to it.
++ */
++static bool select_named_instance(FT_Library ftlib, FT_Face face,
++                                  const char *postscript_name)
++{
++    FT_MM_Var *variations = NULL;
++    bool found = false;
++    if (!FT_HAS_MULTIPLE_MASTERS(face) || FT_Get_MM_Var(face, &variations))
++        return false;
++    for (FT_UInt i = 0; i < variations->num_namedstyles && !found; i++) {
++        FT_UInt id = variations->namedstyle[i].psid;
++        if (id != 0xFFFF && sfnt_name_is(face, id, postscript_name))
++            found = !FT_Set_Named_Instance(face, i + 1);
++    }
++    FT_Done_MM_Var(ftlib, variations);
++    return found;
++}
++
+ FT_Face ass_face_open(ASS_Library *lib, FT_Library ftlib, const char *path,
+                       const char *postscript_name, int index)
+ {
+@@ -361,6 +411,9 @@
+             if (face_psname != NULL &&
+                 strcmp(face_psname, postscript_name) == 0)
+                 return face;
++
++            if (select_named_instance(ftlib, face, postscript_name))
++                return face;
+         }
+ 
+         FT_Done_Face(face);

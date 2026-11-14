@@ -1,0 +1,76 @@
+unix: find the size of a font file without fstat
+
+To map a font file into memory FreeType has to know how long it is, and
+asks fstat. On Apple's systems fstat is one of the calls an app must
+state a reason for, because it also tells a file's dates, and each of
+the reasons on offer is about files of the app or of the person using
+it. The files here are mostly the system's own fonts.
+
+The size is now taken from where the end of the file is, with lseek,
+which is what reading the file through stdio does to find it. Nothing
+else of what fstat tells was used. The offset is put back to the start,
+for the read() that takes over when a file cannot be mapped.
+
+--- a/builds/unix/ftsystem.c
++++ b/builds/unix/ftsystem.c
+@@ -247,8 +247,8 @@
+   FT_Stream_Open( FT_Stream    stream,
+                   const char*  filepathname )
+   {
+-    int          file;
+-    struct stat  stat_buf;
++    int    file;
++    off_t  file_size;
+ 
+ 
+     if ( !stream )
+@@ -276,35 +276,42 @@
+ #endif /* FD_CLOEXEC */
+ #endif /* F_SETFD */
+ 
+-    if ( fstat( file, &stat_buf ) < 0 )
++    /* The size of the file is where its end is.  `fstat' would tell   */
++    /* it too, along with the file's dates, and for that an app on     */
++    /* Apple's systems has to state a reason for the call; there is    */
++    /* none to state for a font of the system.  The offset goes back   */
++    /* to the start for `read', which takes over below when the file   */
++    /* cannot be mapped.                                               */
++    /*                                                                 */
++    file_size = lseek( file, 0, SEEK_END );
++    if ( file_size < 0 || lseek( file, 0, SEEK_SET ) < 0 )
+     {
+       FT_ERROR(( "FT_Stream_Open:" ));
+-      FT_ERROR(( " could not `fstat' file `%s'\n", filepathname ));
++      FT_ERROR(( " could not find the size of file `%s'\n", filepathname ));
+       goto Fail_Map;
+     }
+ 
+     /* XXX: TODO -- real 64bit platform support                        */
+     /*                                                                 */
+     /* `stream->size' is typedef'd to unsigned long (in `ftsystem.h'); */
+-    /* `stat_buf.st_size', however, is usually typedef'd to off_t      */
+-    /* (in sys/stat.h).                                                */
++    /* `file_size', however, is an off_t (in sys/types.h).             */
+     /* On some platforms, the former is 32bit and the latter is 64bit. */
+     /* To avoid overflow caused by fonts in huge files larger than     */
+     /* 2GB, do a test.  Temporary fix proposed by Sean McBride.        */
+     /*                                                                 */
+-    if ( stat_buf.st_size > LONG_MAX )
++    if ( file_size > LONG_MAX )
+     {
+       FT_ERROR(( "FT_Stream_Open: file is too big\n" ));
+       goto Fail_Map;
+     }
+-    else if ( stat_buf.st_size == 0 )
++    else if ( file_size == 0 )
+     {
+       FT_ERROR(( "FT_Stream_Open: zero-length file\n" ));
+       goto Fail_Map;
+     }
+ 
+     /* This cast potentially truncates a 64bit to 32bit! */
+-    stream->size = (unsigned long)stat_buf.st_size;
++    stream->size = (unsigned long)file_size;
+     stream->pos  = 0;
+     stream->base = (unsigned char *)mmap( NULL,
+                                           stream->size,

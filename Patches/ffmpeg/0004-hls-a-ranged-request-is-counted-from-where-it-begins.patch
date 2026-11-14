@@ -1,0 +1,39 @@
+hls: a ranged request is counted from where it begins
+
+A segment that is a range of bytes in a bigger file is asked for with a
+request restricted to that range, and since FFmpeg 9 the segment after
+it, when it follows on in the same file, is read over the same
+connection: the reader seeks to where it begins, which for bytes that
+follow on is no request at all.
+
+That seek is worked out from the count the context keeps of where it
+stands, and the context that is opened for a restricted request counts
+from nought, though its first byte is url_offset bytes into the file. At
+the end of the first segment it believed itself url_offset bytes short
+of the second, and read on past that many bytes of it. With the first
+segment of a fragmented MP4 file, which begins after the bytes that
+describe the streams, the whole second segment was lost: a film played
+its first two seconds and then its fifth.
+
+The count is put where the request began.
+
+--- a/libavformat/hls.c
++++ b/libavformat/hls.c
+@@ -1547,6 +1547,17 @@
+         ret = open_url(pls->parent, in, seg->url, &c->avio_opts, opts, &is_http);
+     }
+ 
++    /* A HTTP request that was restricted to a part of the resource delivers
++     * its first byte from seg->url_offset, while the context opened for it
++     * counts from nought. What is read is right all the same. What went
++     * wrong is going on to the segment after it over the same connection:
++     * the seek there is worked out from the context's count, found
++     * url_offset bytes still to go, and read past that many bytes of the
++     * next segment. The count is put where the request began. */
++    if (ret == 0 && is_http && seg->size >= 0 && seg->key_type == KEY_NONE &&
++        (*in)->buf_ptr == (*in)->buf_end)
++        (*in)->pos = seg->url_offset;
++
+     /* Seek to the requested position. If this was a HTTP request, the offset
+      * should already be where want it to, but this allows e.g. local testing
+      * without a HTTP server.

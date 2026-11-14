@@ -1,0 +1,58 @@
+tls (Secure Transport): a handshake that fails says which of two things stood in the way
+
+Every handshake that failed came out as an input/output error, the same
+as a connection that drops. Two of the reasons are ones a player has to
+tell its host apart, because what there is to do about each is
+different: the server's certificate is not trusted (nothing vouches for
+it but itself, as on most media servers on a home network; or it has run
+out, or is for another name), and the server speaks no version of TLS
+this library does, which stops at 1.2.
+
+Each now has a code of its own. libavutil has none for either, so the
+two are spelled out here and by whoever reads them: FFERRTAG(0xF8,'C',
+'R','T') and FFERRTAG(0xF8,'T','L','S').
+
+--- a/libavformat/tls_securetransport.c	2026-11-14 02:39:32
++++ b/libavformat/tls_securetransport.c	2026-11-14 02:39:32
+@@ -65,6 +65,32 @@
+         return AVERROR(EIO);
+     }
+     return AVERROR(EIO);
++}
++
++/* What stood in the way of a handshake, told apart for a caller that has
++ * something different to do about each: a certificate that is not trusted,
++ * and a peer with which no version of TLS, or no cipher, could be agreed
++ * on. Neither has a code in libavutil; these two are for whoever built
++ * this library with this patch. */
++static int tls_handshake_error(OSStatus status)
++{
++    switch (status) {
++    case errSSLXCertChainInvalid:
++    case errSSLBadCert:
++    case errSSLUnknownRootCert:
++    case errSSLNoRootCert:
++    case errSSLCertExpired:
++    case errSSLCertNotYetValid:
++    case errSSLHostNameMismatch:
++        return FFERRTAG(0xF8, 'C', 'R', 'T');
++    case errSSLPeerProtocolVersion:
++    case errSSLNegotiation:
++    case errSSLPeerHandshakeFail:
++    case errSSLPeerInsufficientSecurity:
++        return FFERRTAG(0xF8, 'T', 'L', 'S');
++    default:
++        return AVERROR(EIO);
++    }
+ }
+ 
+ static int import_pem(URLContext *h, char *path, CFArrayRef *array)
+@@ -333,7 +359,7 @@
+             break;
+         } else if (status != errSSLWouldBlock) {
+             av_log(h, AV_LOG_ERROR, "Unable to negotiate TLS/SSL session: %i\n", (int)status);
+-            ret = AVERROR(EIO);
++            ret = tls_handshake_error(status);
+             goto fail;
+         }
+     }

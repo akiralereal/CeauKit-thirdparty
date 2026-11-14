@@ -1,0 +1,51 @@
+http: a body sent as bare deflate is read
+
+`Content-Encoding: deflate` means deflate inside a zlib wrapper. Servers
+written on .NET, a widely used media server among them, send deflate
+with nothing around it under that name. The inflater was set up to find
+a gzip or a zlib header, found neither, and every read of the body came
+back empty with a warning: a playlist sent that way could not be read.
+
+When the very first bytes of a body fail as a header, the same bytes are
+now read again as bare deflate, which is what curl and the browsers do.
+A body with a header is read as before.
+
+FFmpeg's connections state no `Accept-Encoding`, so a server that goes
+by what it is asked sends them nothing compressed. This is for the one
+that compresses anyway, and for a caller that adds the header itself.
+
+--- a/libavformat/http.c	2026-11-14 02:22:14
++++ b/libavformat/http.c	2026-11-14 02:22:14
+@@ -1840,7 +1840,7 @@
+ static int http_buf_read_compressed(URLContext *h, uint8_t *buf, int size)
+ {
+     HTTPContext *s = h->priv_data;
+-    int ret;
++    int ret, fresh;
+ 
+     if (!s->inflate_buffer) {
+         s->inflate_buffer = av_malloc(DECOMPRESS_BUF_SIZE);
+@@ -1859,7 +1859,23 @@
+     s->inflate_stream.avail_out = size;
+     s->inflate_stream.next_out  = buf;
+ 
++    fresh = s->inflate_stream.total_in == 0;
+     ret = inflate(&s->inflate_stream, Z_SYNC_FLUSH);
++    if (ret == Z_DATA_ERROR && fresh) {
++        /* "deflate" means deflate inside a zlib wrapper, and some servers
++         * send it bare all the same. What fails then is the wrapper's
++         * header, in the first two bytes: begin again, and read the same
++         * bytes as deflate with nothing around it. */
++        unsigned available = s->inflate_stream.avail_in +
++                             (unsigned)(s->inflate_stream.next_in - s->inflate_buffer);
++        if (inflateReset2(&s->inflate_stream, -15) == Z_OK) {
++            s->inflate_stream.next_in   = s->inflate_buffer;
++            s->inflate_stream.avail_in  = available;
++            s->inflate_stream.avail_out = size;
++            s->inflate_stream.next_out  = buf;
++            ret = inflate(&s->inflate_stream, Z_SYNC_FLUSH);
++        }
++    }
+     if (ret != Z_OK && ret != Z_STREAM_END)
+         av_log(h, AV_LOG_WARNING, "inflate return value: %d, %s\n",
+                ret, s->inflate_stream.msg);

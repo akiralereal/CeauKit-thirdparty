@@ -1,0 +1,104 @@
+http: headers written for one host do not follow a redirect to another
+
+A player hands the connection the request headers its host wrote for a
+media: a token for a media server, a name and a password for a WebDAV
+share. A server may answer by sending the request on to another host (a
+download node, a store of files), and FFmpeg then sent every one of
+those headers there too.
+
+With the `headers_elsewhere` option a caller states what to send in
+place of `headers` once a redirect has led to a host of another name:
+the same headers less the ones that say who is asking, which only the
+caller can tell apart. They take the place of `headers` for the rest of
+the connection's life, a seek and a reconnection included. Without the
+option nothing changes. A redirect on the same host, to another port or
+from HTTP to HTTPS, leaves the headers as they are.
+
+The option is among those a playlist's connection hands on to the
+requests the playlist leads to, so each of those is covered the same way.
+
+--- a/libavformat/aviobuf.c	2026-11-14 02:10:13
++++ b/libavformat/aviobuf.c	2026-11-14 02:10:13
+@@ -994,7 +994,7 @@
+ int ffio_copy_url_options(AVIOContext* pb, AVDictionary** avio_opts)
+ {
+     const char *opts[] = {
+-        "headers", "user_agent", "cookies", "http_proxy", "referer", "rw_timeout", "icy", NULL };
++        "headers", "headers_elsewhere", "user_agent", "cookies", "http_proxy", "referer", "rw_timeout", "icy", NULL };
+     const char **opt = opts;
+     uint8_t *buf = NULL;
+     int ret = 0;
+--- a/libavformat/http.c	2026-11-14 02:08:57
++++ b/libavformat/http.c	2026-11-14 02:08:57
+@@ -85,6 +85,7 @@
+     HTTPAuthState proxy_auth_state;
+     char *http_proxy;
+     char *headers;
++    char *headers_elsewhere;
+     char *mime_type;
+     char *http_version;
+     char *user_agent;
+@@ -170,6 +171,7 @@
+     { "chunked_post", "use chunked transfer-encoding for posts", OFFSET(chunked_post), AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, E },
+     { "http_proxy", "set HTTP proxy to tunnel through", OFFSET(http_proxy), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, D | E },
+     { "headers", "set custom HTTP headers, can override built in default headers", OFFSET(headers), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, D | E },
++    { "headers_elsewhere", "the custom HTTP headers to send in place of 'headers' once a redirect has led to another host", OFFSET(headers_elsewhere), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, D },
+     { "content_type", "set a specific content type for the POST messages", OFFSET(content_type), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, D | E },
+     { "user_agent", "override User-Agent header", OFFSET(user_agent), AV_OPT_TYPE_STRING, { .str = DEFAULT_USER_AGENT }, 0, 0, D },
+     { "referer", "override referer header", OFFSET(referer), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, D },
+@@ -397,7 +399,35 @@
+     ret = av_dict_set(&s->redirect_cache, source, value, AV_DICT_MATCH_CASE | AV_DICT_DONT_STRDUP_VAL);
+     if (ret < 0)
+         return ret;
++
++    return 0;
++}
++
++/* Custom headers are written for the host that is asked. When that host
++ * sends the request on to another one, what the caller set aside for other
++ * hosts takes their place, for as long as this connection lasts. */
++static int http_leave_host(HTTPContext *s, const char *from, const char *to)
++{
++    char host_from[1024], host_to[1024];
++    char *elsewhere;
++    size_t len;
++
++    if (!s->headers_elsewhere)
++        return 0;
++    av_url_split(NULL, 0, NULL, 0, host_from, sizeof(host_from), NULL, NULL, 0, from);
++    av_url_split(NULL, 0, NULL, 0, host_to, sizeof(host_to), NULL, NULL, 0, to);
++    if (!av_strcasecmp(host_from, host_to))
++        return 0;
+ 
++    len = strlen(s->headers_elsewhere);
++    elsewhere = av_malloc(len + 3);
++    if (!elsewhere)
++        return AVERROR(ENOMEM);
++    memcpy(elsewhere, s->headers_elsewhere, len + 1);
++    if (len && (len < 2 || strcmp("\r\n", elsewhere + len - 2)))
++        memcpy(elsewhere + len, "\r\n", 3);
++    av_free(s->headers);
++    s->headers = elsewhere;
+     return 0;
+ }
+ 
+@@ -418,6 +448,9 @@
+     if (cached) {
+         if (redirects++ >= s->max_redirects)
+             return AVERROR(EIO);
++
++        if ((ret = http_leave_host(s, s->location, cached)) < 0)
++            goto fail;
+ 
+         av_free(s->location);
+         s->location = av_strdup(cached);
+@@ -500,6 +533,9 @@
+             redirect_cache_set(s, s->location, s->new_location, s->expires);
+         }
+ 
++        if ((ret = http_leave_host(s, s->location, s->new_location)) < 0)
++            return ret;
++
+         av_free(s->location);
+         s->location = s->new_location;
+         s->new_location = NULL;
