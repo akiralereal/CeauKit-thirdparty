@@ -16,6 +16,18 @@
 # script installs, with Ninja, into a Python environment of its own under
 # Vendor/build; nothing is installed on the Mac.
 #
+# A second library from outside goes in the same way: libxml2, which FFmpeg's
+# DASH reader reads a manifest with (an MPD is XML). It is built from its
+# pinned release with the same Meson, static, with its parser and its tree
+# and nothing else the library offers: no HTTP or FTP of its own, no iconv
+# (a manifest is UTF-8, which libxml2 reads by itself, as it does UTF-16 and
+# Latin-1), no ICU, no zlib, no catalogs (which would have it read files of
+# the system's), no XPath, no validation, no HTML, no modules, no Python.
+# It keeps its threads: two players may read a manifest each at one time.
+# Its licence (MIT) allows that. The other reader FFmpeg has for XML, IMF's,
+# comes with it and is left out: nothing a player is handed is an IMF
+# composition.
+#
 # Needed on the Mac beside Xcode: python3, for that environment, and nasm
 # (`brew install nasm`) for the hand-written code of the Intel half of the
 # macOS slice. Without nasm that half is built in plain C, and says so.
@@ -24,7 +36,10 @@
 # (Scripts/privacy-manifest.sh), written from what the finished binary calls.
 #
 # A watch plays sound and shows no picture, and its slices are built for
-# that. dav1d is not in them, having no picture to decode. VideoToolbox and
+# that. dav1d is not in them, having no picture to decode, and libxml2 is not
+# either: DASH on a watch would cost its two architectures some 0.6 MB each,
+# for a kind of source a watch is not handed, so its slices have no DASH
+# reader and an opening of a manifest there says so. VideoToolbox and
 # AudioToolbox are not asked for where the SDK has no such framework, which
 # is the watch's. Everything else is as in every slice: the containers, the
 # protocols and the decoders, those of pictures too, which the opening of a
@@ -47,6 +62,8 @@ VERSION=9.0.2
 SHA256=8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
 DAV1D=1.5.4
 DAV1D_SHA256=686616b7c69eb88d44459391ab25cac13b6647a3b288835c5784e71c1514a5c5
+LIBXML2=2.15.4
+LIBXML2_SHA256=98087fd181d9070724f3fbc65c7377db03038eb92bd882374daff44940138821
 # The tools that build dav1d, as the wheels PyPI serves for a Mac.
 MESON=1.12.1
 MESON_SHA256=930bc7542cbd9f57009e182fd014eba48cf1a0180a7b9006d2d32d8f168d8b02
@@ -59,6 +76,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$ROOT/Vendor/build"
 SOURCE="$WORK/src/ffmpeg-$VERSION"
 DAV1D_SOURCE="$WORK/src/dav1d-$DAV1D"
+LIBXML2_SOURCE="$WORK/src/libxml2-$LIBXML2"
 TOOLS="$WORK/tools"
 # Every core, unless told to leave some for whatever else the Mac is doing.
 JOBS="${CEAUKIT_JOBS:-$(sysctl -n hw.ncpu)}"
@@ -126,6 +144,46 @@ fetch_dav1d() {
     fi
 }
 
+# libxml2, from GNOME's own download server, with Patches/libxml2 applied in
+# name order should there ever be any. Its licence is the file `Copyright`,
+# which says that two of its files have notices of their own, dict.c and
+# list.c; both are in what is linked. The licence as it ships is the three
+# together, written beside the sources as LICENSE-libxml2.txt, which the
+# frameworks carry and Scripts/make-notices.sh copies.
+fetch_libxml2() {
+    local archive="$WORK/src/libxml2-$LIBXML2.tar.xz" actual patch identity file
+    if [[ ! -f "$archive" ]]; then
+        log "Downloading libxml2 $LIBXML2"
+        curl -fL --retry 3 -o "$archive" "https://download.gnome.org/sources/libxml2/${LIBXML2%.*}/libxml2-$LIBXML2.tar.xz"
+    fi
+    actual="$(shasum -a 256 "$archive" | cut -d' ' -f1)"
+    [[ "$actual" == "$LIBXML2_SHA256" ]] || die "libxml2-$LIBXML2.tar.xz has SHA-256 $actual, expected $LIBXML2_SHA256"
+
+    LIBXML2_PATCHES_ID="$({ cat "$ROOT"/Patches/libxml2/*.patch 2>/dev/null || true; } | shasum -a 256 | cut -c1-16)"
+    identity="$LIBXML2_SHA256 $LIBXML2_PATCHES_ID"
+    if [[ "$(cat "$LIBXML2_SOURCE/.ceaukit-unpacked" 2>/dev/null)" != "$identity" ]]; then
+        rm -rf "$LIBXML2_SOURCE"
+        tar -xf "$archive" -C "$WORK/src"
+        for patch in "$ROOT"/Patches/libxml2/*.patch; do
+            [[ -f "$patch" ]] || continue
+            log "Applying $(basename "$patch")"
+            patch -d "$LIBXML2_SOURCE" -p1 --no-backup-if-mismatch < "$patch" > /dev/null \
+                || die "$(basename "$patch") does not apply to libxml2 $LIBXML2"
+        done
+        {
+            cat "$LIBXML2_SOURCE/Copyright"
+            for file in dict.c list.c; do
+                # The notice at the head of the file, out of its comment.
+                printf '\n%s:\n\n' "$file"
+                sed -n '/^ \* Copyright/,/CONCEIVABLE MANNER/p' "$LIBXML2_SOURCE/$file" | sed -e 's/^ \* \{0,1\}//' -e 's/^ \*$//'
+            done
+        } > "$LIBXML2_SOURCE/LICENSE-libxml2.txt"
+        grep -q 'Gary Pennington' "$LIBXML2_SOURCE/LICENSE-libxml2.txt" \
+            || die "libxml2 $LIBXML2: the notices of dict.c and list.c were not found where they were"
+        echo "$identity" > "$LIBXML2_SOURCE/.ceaukit-unpacked"
+    fi
+}
+
 # Meson and Ninja, in a Python environment that belongs to this build. pip is
 # given the hash of each wheel and takes nothing else.
 install_build_tools() {
@@ -147,12 +205,14 @@ install_build_tools() {
     export NINJA="$environment/bin/ninja"
 }
 
-# Sets SDK, OS, MIN_OS, SUFFIX, ARCHS and PLIST_PLATFORM for a platform, and
-# PICTURE: whether anything there shows a picture. Where nothing does, the
-# libraries that only decode pictures are left out.
+# Sets SDK, OS, MIN_OS, SUFFIX, ARCHS and PLIST_PLATFORM for a platform,
+# PICTURE: whether anything there shows a picture (where nothing does, the
+# libraries that only decode pictures are left out), and DASH.
 describe_platform() {
     SUFFIX=""
     PICTURE=yes
+    # DASH: whether FFmpeg's reader for it, and libxml2 with it, is in.
+    DASH=yes
     case "$1" in
         macos)          SDK=macosx;           OS=macos; MIN_OS=15.0; ARCHS="arm64 x86_64"; PLIST_PLATFORM=MacOSX ;;
         ios)            SDK=iphoneos;         OS=ios;   MIN_OS=18.0; ARCHS="arm64";        PLIST_PLATFORM=iPhoneOS ;;
@@ -161,31 +221,19 @@ describe_platform() {
         tvos-simulator) SDK=appletvsimulator; OS=tvos;  MIN_OS=18.0; ARCHS="arm64";        PLIST_PLATFORM=AppleTVSimulator; SUFFIX=-simulator ;;
         xros)           SDK=xros;             OS=xros;  MIN_OS=2.0;  ARCHS="arm64";        PLIST_PLATFORM=XROS ;;
         xros-simulator) SDK=xrsimulator;      OS=xros;  MIN_OS=2.0;  ARCHS="arm64";        PLIST_PLATFORM=XRSimulator; SUFFIX=-simulator ;;
-        watchos)           SDK=watchos;        OS=watchos; MIN_OS=11.0; ARCHS="arm64 arm64_32"; PLIST_PLATFORM=WatchOS; PICTURE=no ;;
-        watchos-simulator) SDK=watchsimulator; OS=watchos; MIN_OS=11.0; ARCHS="arm64";          PLIST_PLATFORM=WatchSimulator; SUFFIX=-simulator; PICTURE=no ;;
+        watchos)           SDK=watchos;        OS=watchos; MIN_OS=11.0; ARCHS="arm64 arm64_32"; PLIST_PLATFORM=WatchOS; PICTURE=no; DASH=no ;;
+        watchos-simulator) SDK=watchsimulator; OS=watchos; MIN_OS=11.0; ARCHS="arm64";          PLIST_PLATFORM=WatchSimulator; SUFFIX=-simulator; PICTURE=no; DASH=no ;;
         *) die "unknown platform '$1' (known: ${ALL_PLATFORMS[*]})" ;;
     esac
 }
 
-# Compiles dav1d for one architecture into $1/dav1d/install. Its hand-written
-# code for arm64 goes through the C compiler; for Intel it needs nasm, and is
-# left out without it.
-compile_dav1d() {
-    local build_dir="$1" arch="$2" triple="$3" sdk_path="$4" cc="$5"
-    local dir="$build_dir/dav1d" family=aarch64 assembly=true assembler=""
-    if [[ "$arch" == x86_64 ]]; then
-        family=x86_64
-        if command -v nasm >/dev/null; then
-            assembler="nasm = '$(command -v nasm)'"
-        else
-            assembly=false
-        fi
-    fi
-    mkdir -p "$dir"
-    # Meson is told about the machine the code is for in a file. Every Apple
-    # system is "darwin" to it; the target triple says which one. Nothing it
-    # builds here can be run on this Mac, and nothing needs to be.
-    cat > "$dir/cross.ini" <<EOF
+# Meson is told about the machine the code is for in a file. Every Apple
+# system is "darwin" to it; the target triple says which one. Nothing it
+# builds here can be run on this Mac, and nothing needs to be.
+write_cross_file() {
+    local path="$1" arch="$2" triple="$3" sdk_path="$4" cc="$5" assembler="${6:-}" family=aarch64
+    [[ "$arch" == x86_64 ]] && family=x86_64
+    cat > "$path" <<EOF
 [binaries]
 c = ['$cc', '-target', '$triple', '-isysroot', '$sdk_path']
 ar = '$(xcrun -f ar)'
@@ -201,6 +249,23 @@ cpu_family = '$family'
 cpu = '$arch'
 endian = 'little'
 EOF
+}
+
+# Compiles dav1d for one architecture into $1/dav1d/install. Its hand-written
+# code for arm64 goes through the C compiler; for Intel it needs nasm, and is
+# left out without it.
+compile_dav1d() {
+    local build_dir="$1" arch="$2" triple="$3" sdk_path="$4" cc="$5"
+    local dir="$build_dir/dav1d" assembly=true assembler=""
+    if [[ "$arch" == x86_64 ]]; then
+        if command -v nasm >/dev/null; then
+            assembler="nasm = '$(command -v nasm)'"
+        else
+            assembly=false
+        fi
+    fi
+    mkdir -p "$dir"
+    write_cross_file "$dir/cross.ini" "$arch" "$triple" "$sdk_path" "$cc" "$assembler"
     "$MESON_BIN" setup "$dir/obj" "$DAV1D_SOURCE" --cross-file "$dir/cross.ini" \
         --prefix "$dir/install" --libdir lib --buildtype release --default-library static \
         -Denable_asm="$assembly" -Denable_tools=false -Denable_tests=false -Denable_examples=false \
@@ -213,33 +278,77 @@ EOF
     [[ -f "$dir/install/lib/libdav1d.a" ]] || die "dav1d: no library for $triple"
 }
 
-# FFmpeg looks for dav1d through pkg-config and no other way. This stands in
-# for pkg-config and knows that one library, so nothing installed on this Mac
-# can be found by mistake. Without a prefix it knows no library at all.
+# Compiles libxml2 for one architecture into $1/libxml2/install: the library,
+# its headers and nothing else of use (its own tools are compiled with it
+# and never shipped). What it was configured with is looked at in the header
+# it installs, which states each part the library has.
+compile_libxml2() {
+    local build_dir="$1" arch="$2" triple="$3" sdk_path="$4" cc="$5"
+    local dir="$build_dir/libxml2" parts
+    mkdir -p "$dir"
+    write_cross_file "$dir/cross.ini" "$arch" "$triple" "$sdk_path" "$cc"
+    # `minimum` leaves every part out that is not asked for; threads are
+    # asked for, and the rest is said outright so that it stays so.
+    "$MESON_BIN" setup "$dir/obj" "$LIBXML2_SOURCE" --cross-file "$dir/cross.ini" \
+        --prefix "$dir/install" --libdir lib --buildtype release --default-library static \
+        -Dminimum=true -Dthreads=enabled \
+        -Dhttp=disabled -Diconv=disabled -Diso8859x=disabled -Dicu=disabled -Dzlib=disabled \
+        -Dcatalog=disabled -Dmodules=disabled -Dpython=disabled -Ddocs=disabled \
+        -Dreadline=disabled -Dhistory=disabled \
+        > "$dir/setup.log" 2>&1 || { tail -30 "$dir/setup.log"; die "libxml2: meson failed for $triple"; }
+    "$NINJA" -C "$dir/obj" -j "$JOBS" install > "$dir/build.log" 2>&1 \
+        || { tail -40 "$dir/build.log"; die "libxml2: build failed for $triple"; }
+    [[ -f "$dir/install/lib/libxml2.a" ]] || die "libxml2: no library for $triple"
+    parts="$("$cc" -target "$triple" -isysroot "$sdk_path" -I"$dir/install/include/libxml2" -E -dM -x c - \
+        <<< '#include <libxml/xmlversion.h>' | sed -n 's/^#define LIBXML_\([A-Z0-9_]*\)_ENABLED.*/\1/p' | sort | tr '\n' ' ')"
+    [[ "$parts" == "THREAD TREE " ]] || die "libxml2 for $triple has other parts than its parser, its tree and its threads: $parts"
+}
+
+# FFmpeg looks for dav1d and libxml2 through pkg-config and no other way.
+# This stands in for pkg-config and knows those two libraries, each where it
+# was built for this architecture, so nothing installed on this Mac can be
+# found by mistake. It knows only the ones it is given a folder for, and
+# without any it knows no library at all.
+#
+# libxml2's headers are in a folder of their own, which is what its users
+# name. FFmpeg's configure looks for its version header by the name of that
+# folder, so the folder above it is named as well: the SDKs have a libxml2
+# of their own, with headers of that name, and the header looked at is
+# this build's.
 write_pkg_config() {
-    local path="$1" prefix="${2:-}"
-    if [[ -z "$prefix" ]]; then
-        printf '#!/bin/sh\n[ "$1" = --version ] && echo 0.29.2 && exit 0\nexit 1\n' > "$path"
-        chmod +x "$path"
-        return
-    fi
-    cat > "$path" <<EOF
+    local path="$1" dav1d="${2:-}" xml="${3:-}"
+    {
+        cat <<'EOF'
 #!/bin/sh
-known="" answer=""
+package="" want=""
 for argument; do
-    case "\$argument" in
+    case "$argument" in
         --version) echo 0.29.2; exit 0 ;;
-        --cflags) answer="-I$prefix/include" ;;
-        --libs) answer="-L$prefix/lib -ldav1d" ;;
-        --variable=includedir) answer="$prefix/include" ;;
-        dav1d|dav1d\ *) known=yes ;;    # also "dav1d >= 1.0.0", as one word or three
+        --cflags|--libs|--variable=includedir) want="$argument" ;;
+EOF
+        # Also "dav1d >= 1.0.0", as one word or three.
+        [[ -z "$dav1d" ]] || echo '        dav1d|dav1d\ *) package=dav1d ;;'
+        [[ -z "$xml" ]] || echo '        libxml-2.0|libxml-2.0\ *) package=libxml2 ;;'
+        cat <<'EOF'
         -*|">="|[0-9]*) ;;
         *) exit 1 ;;
     esac
 done
-[ -n "\$known" ] || exit 1
-[ -z "\$answer" ] || echo "\$answer"
+[ -n "$package" ] || exit 1
+case "$package$want" in
 EOF
+        if [[ -n "$dav1d" ]]; then
+            echo "    dav1d--cflags) echo '-I$dav1d/include' ;;"
+            echo "    dav1d--libs) echo '-L$dav1d/lib -ldav1d' ;;"
+            echo "    dav1d--variable=includedir) echo '$dav1d/include' ;;"
+        fi
+        if [[ -n "$xml" ]]; then
+            echo "    libxml2--cflags) echo '-I$xml/include/libxml2 -I$xml/include' ;;"
+            echo "    libxml2--libs) echo '-L$xml/lib -lxml2' ;;"
+            echo "    libxml2--variable=includedir) echo '$xml/include' ;;"
+        fi
+        echo "esac"
+    } > "$path"
     chmod +x "$path"
 }
 
@@ -250,7 +359,7 @@ compile() {
     # The toolchain's clang has no default SDK, so the tools FFmpeg builds to
     # run on this Mac during the build need theirs spelled out too.
     local host_flags="-isysroot $(xcrun -sdk macosx --show-sdk-path)"
-    local extra=() ffmpeg_arch="$arch" framework system_decoders=() picture_decoders=()
+    local extra=() ffmpeg_arch="$arch" framework system_decoders=() picture_decoders=() manifest_readers=()
     if [[ "$arch" == x86_64 ]] && ! command -v nasm >/dev/null; then
         # Hardware decoding is unaffected; software decoding on Intel Macs is
         # slower without the hand-written assembly. `brew install nasm` to get it.
@@ -274,6 +383,8 @@ compile() {
         fi
     done
     [[ "$PICTURE" == yes ]] && picture_decoders+=(--enable-libdav1d)
+    # DASH's reader needs libxml2; IMF's would come with it, and is not wanted.
+    [[ "$DASH" == yes ]] && manifest_readers+=(--enable-libxml2 --disable-demuxer=imf)
 
     local options=(
         --prefix="$build_dir/install"
@@ -289,6 +400,7 @@ compile() {
         ${system_decoders[@]+"${system_decoders[@]}"} --enable-securetransport
         --enable-zlib --enable-bzlib --enable-iconv
         ${picture_decoders[@]+"${picture_decoders[@]}"}
+        ${manifest_readers[@]+"${manifest_readers[@]}"}
         --disable-filters
         --enable-filter=bwdif,yadif,scale,format,null,anull,aresample,aformat,volume,acompressor,dynaudnorm,loudnorm
         ${extra[@]+"${extra[@]}"}
@@ -296,7 +408,7 @@ compile() {
 
     # A finished compile is reused as long as it was configured the same way.
     local stamp="$build_dir/install/configured-with"
-    local identity="$VERSION+$PATCHES_ID dav1d $DAV1D+$DAV1D_PATCHES_ID ${options[*]}"
+    local identity="$VERSION+$PATCHES_ID dav1d $DAV1D+$DAV1D_PATCHES_ID libxml2 $LIBXML2+$LIBXML2_PATCHES_ID ${options[*]}"
     if [[ -f "$stamp" && "$(cat "$stamp")" == "$identity" ]]; then
         echo "reusing the finished compile in ${build_dir#"$ROOT"/}"
         return
@@ -304,12 +416,16 @@ compile() {
 
     rm -rf "$build_dir"
     mkdir -p "$build_dir/obj"
+    local dav1d_prefix="" xml_prefix=""
     if [[ "$PICTURE" == yes ]]; then
         compile_dav1d "$build_dir" "$arch" "$triple" "$sdk_path" "$cc"
-        write_pkg_config "$build_dir/pkg-config" "$build_dir/dav1d/install"
-    else
-        write_pkg_config "$build_dir/pkg-config"
+        dav1d_prefix="$build_dir/dav1d/install"
     fi
+    if [[ "$DASH" == yes ]]; then
+        compile_libxml2 "$build_dir" "$arch" "$triple" "$sdk_path" "$cc"
+        xml_prefix="$build_dir/libxml2/install"
+    fi
+    write_pkg_config "$build_dir/pkg-config" "$dav1d_prefix" "$xml_prefix"
 
     cd "$build_dir/obj"
     "$SOURCE/configure" "${options[@]}" > configure.log 2>&1 \
@@ -332,6 +448,15 @@ compile() {
         grep -q '^#define CONFIG_LIBDAV1D_DECODER 0' config_components.h \
             || die "$triple was configured with dav1d, and shows no picture"
     fi
+    if [[ "$DASH" == yes ]]; then
+        grep -q '^#define CONFIG_LIBXML2 1' config.h && grep -q '^#define CONFIG_DASH_DEMUXER 1' config_components.h \
+            || die "$triple was configured without libxml2 and DASH"
+    else
+        grep -q '^#define CONFIG_DASH_DEMUXER 0' config_components.h \
+            || die "$triple was configured with DASH, and was not to be"
+    fi
+    grep -q '^#define CONFIG_IMF_DEMUXER 0' config_components.h \
+        || die "$triple was configured with the IMF reader"
     # The hand-written code is what makes software decoding quick enough to
     # watch. A build that was meant to have it and has not is not a build.
     if [[ "$arch" == arm64 ]]; then
@@ -362,7 +487,7 @@ system_libraries() {
         fi
         case "$token" in
             -lav*|-lsw*) continue ;;   # FFmpeg's own libraries, linked whole below
-            -ldav1d) continue ;;       # named by its file below
+            -ldav1d|-lxml2) continue ;;   # named by their files below
             -l*|-framework\ *|-pthread) ;;
             *) continue ;;
         esac
@@ -379,14 +504,17 @@ system_libraries() {
 # is named as a root, so the linker pulls in whatever it needs from the static
 # libraries in the usual way. Loading the archives whole instead does not link:
 # some objects are deliberately present in more than one of them. dav1d comes
-# in as what FFmpeg's decoder for it calls, and none of it is exported.
+# in as what FFmpeg's decoder for it calls, libxml2 as what the DASH reader
+# calls, and none of either is exported. Each is named by its archive, so
+# that the SDK's own libxml2, which has the same name, is not the one found.
 link_dylib() {
     local build_dir="$1" triple="$2" sdk_path="$3" cc="$4" install_name="$5"
-    local prefix="$build_dir/install" lib archives=() dav1d=()
+    local prefix="$build_dir/install" lib archives=() dav1d=() xml=()
     for lib in libavformat libavcodec libavfilter libswresample libswscale libavutil; do
         archives+=("$prefix/lib/$lib.a")
     done
     [[ "$PICTURE" == yes ]] && dav1d=("$build_dir/dav1d/install/lib/libdav1d.a")
+    [[ "$DASH" == yes ]] && xml=("$build_dir/libxml2/install/lib/libxml2.a")
 
     local exports="$build_dir/exports.txt" roots="$build_dir/roots.rsp"
     nm -gU "${archives[@]}" 2>/dev/null \
@@ -401,7 +529,7 @@ link_dylib() {
     # shellcheck disable=SC2046
     "$cc" -dynamiclib -target "$triple" -isysroot "$sdk_path" \
         "@$roots" -Wl,-exported_symbols_list,"$exports" \
-        "${archives[@]}" ${dav1d[@]+"${dav1d[@]}"} \
+        "${archives[@]}" ${dav1d[@]+"${dav1d[@]}"} ${xml[@]+"${xml[@]}"} \
         $(system_libraries "$prefix") -liconv \
         -install_name "$install_name" \
         -compatibility_version 1 -current_version "$VERSION" \
@@ -454,6 +582,11 @@ build_platform() {
         log "$platform: compiling $triple"
         compile "$build_dir" "$arch" "$triple" "$sdk_path" "$cc"
         link_dylib "$build_dir" "$triple" "$sdk_path" "$cc" "$install_name"
+        # Before the strip, which takes the names of what is not exported.
+        # (Not `grep -q`, which stops reading, has nm told so, and fails the pipe.)
+        if [[ "$DASH" == yes ]] && ! nm "$build_dir/FFmpeg" | grep ' t _xmlReadMemory$' > /dev/null; then
+            die "$triple: FFmpeg has no libxml2 inside"
+        fi
         dylibs+=("$build_dir/FFmpeg")
     done
 
@@ -475,6 +608,7 @@ build_platform() {
     # The licences travel with the binary.
     cp "$SOURCE/COPYING.LGPLv2.1" "$resources/"
     [[ "$PICTURE" == yes ]] && cp "$DAV1D_SOURCE/COPYING" "$resources/LICENSE-dav1d.txt"
+    [[ "$DASH" == yes ]] && cp "$LIBXML2_SOURCE/LICENSE-libxml2.txt" "$resources/LICENSE-libxml2.txt"
     lipo -create "${dylibs[@]}" -output "$content/FFmpeg"
     strip -x "$content/FFmpeg" 2>/dev/null
     verify_binary "$content/FFmpeg" "$platform"
@@ -500,6 +634,11 @@ verify_binary() {
     fi
     if strings -a "$binary" | grep -q -F -e "$ROOT" -e "$HOME"; then
         die "$platform: the binary names folders of the Mac it was built on"
+    fi
+    # The libxml2 inside is this build's. The system's, which the SDK offers
+    # under the same name, is not one the binary may lean on.
+    if otool -L "$binary" | grep 'libxml2' > /dev/null; then
+        die "$platform: FFmpeg is linked against the system's libxml2"
     fi
     echo "$platform: $(lipo -archs "$binary"), $(($(stat -f%z "$binary") / 1048576)) MB, no weak system imports"
 }
@@ -552,7 +691,11 @@ assemble_xcframework() {
         echo "dav1d $DAV1D, source SHA-256 $DAV1D_SHA256, linked in statically, in every slice but the watch's"
         echo "Patches: $(cd "$ROOT/Patches/dav1d" 2>/dev/null && ls *.patch 2>/dev/null | tr '\n' ' ')"
         echo "License: BSD 2-Clause (see LICENSE-dav1d.txt inside each framework that has it)"
-        echo "watchOS: sound alone. No dav1d, no VideoToolbox, no AudioToolbox; arm64_32 without assembly"
+        echo "libxml2 $LIBXML2, source SHA-256 $LIBXML2_SHA256, linked in statically, in every slice but the watch's, for the DASH reader"
+        echo "Patches: $(cd "$ROOT/Patches/libxml2" 2>/dev/null && ls *.patch 2>/dev/null | tr '\n' ' ')"
+        echo "Built with: its parser, its tree and its threads; no HTTP, iconv, ICU, zlib, catalogs, XPath, validation, HTML or modules"
+        echo "License: MIT (see LICENSE-libxml2.txt inside each framework that has it; dict.c and list.c carry notices of their own, which it includes)"
+        echo "watchOS: sound alone. No dav1d, no libxml2 and no DASH, no VideoToolbox, no AudioToolbox; arm64_32 without assembly"
         echo "Assembler for x86_64: $(nasm --version 2>/dev/null || echo "none, so no x86 assembly")"
         echo "Built $(date -u +%Y-%m-%dT%H:%M:%SZ) with $(xcodebuild -version | tr '\n' ' ')"
         echo "Configure options: see Scripts/build-ffmpeg.sh at the commit that produced this"
@@ -565,6 +708,7 @@ for platform in "${PLATFORMS[@]}"; do describe_platform "$platform"; done
 
 fetch_source
 fetch_dav1d
+fetch_libxml2
 install_build_tools
 for platform in "${PLATFORMS[@]}"; do build_platform "$platform"; done
 install_c_target

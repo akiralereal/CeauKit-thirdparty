@@ -1,7 +1,7 @@
 # CeauKit third-party sources
 
 CeauKit is the playback engine of the app Ceau. Its binaries contain builds of
-six open-source libraries, three of them with changes. This repository holds
+seven open-source libraries, three of them with changes. This repository holds
 what those builds are made from: the patches, the build scripts, the licence
 texts, and every upstream source archive, with its address and checksum.
 
@@ -10,18 +10,19 @@ CeauKit itself is not in this repository.
 ## The libraries
 
 Two dynamic frameworks are built. `FFmpeg.framework` contains FFmpeg, with
-dav1d linked into it statically. `Libass.framework` contains libass, FreeType,
+dav1d and libxml2 linked into it statically (libxml2 for FFmpeg's DASH reader). `Libass.framework` contains libass, FreeType,
 HarfBuzz and FriBidi. For watchOS only FFmpeg is built, without dav1d: a
 watch plays sound alone.
 
 | Library | Version | Licence | Patches | Upstream archive | SHA-256 of the archive |
 | --- | --- | --- | --- | --- | --- |
-| FFmpeg | 9.0.2 | LGPL 2.1 or later | 14 | [ffmpeg-9.0.2.tar.xz](https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz) | `8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e` |
+| FFmpeg | 9.0.2 | LGPL 2.1 or later | 16 | [ffmpeg-9.0.2.tar.xz](https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz) | `8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e` |
 | dav1d | 1.5.4 | BSD 2-Clause | 0 | [dav1d-1.5.4.tar.xz](https://downloads.videolan.org/pub/videolan/dav1d/1.5.4/dav1d-1.5.4.tar.xz) | `686616b7c69eb88d44459391ab25cac13b6647a3b288835c5784e71c1514a5c5` |
 | libass | 0.17.5 | ISC | 1 | [libass-0.17.5.tar.xz](https://github.com/libass/libass/releases/download/0.17.5/libass-0.17.5.tar.xz) | `2dca25c0e0c837ddf00b52011b3f82cac1e4ddd3ad018227806b0c2288864acc` |
 | FreeType | 2.15.0 | FreeType License (FTL) | 2 | [freetype-2.15.0.tar.xz](https://download.savannah.gnu.org/releases/freetype/freetype-2.15.0.tar.xz) | `93cd47eb719c325107f2d3cf087d06299e944c3b48a40b55537302304dea1dd5` |
 | HarfBuzz | 15.1.0 | MIT | 0 | [harfbuzz-15.1.0.tar.xz](https://github.com/harfbuzz/harfbuzz/releases/download/15.1.0/harfbuzz-15.1.0.tar.xz) | `0fc7c565443a5f4be7da65ac5ee5bd737d9b158dc908708b7689a0a5796b0c8d` |
 | FriBidi | 1.0.18 | LGPL 2.1 or later | 0 | [fribidi-1.0.18.tar.xz](https://github.com/fribidi/fribidi/releases/download/v1.0.18/fribidi-1.0.18.tar.xz) | `1de5e8073d035388b71d0b2d452b1da1f8caeea8a7702997b401fe1b6250727f` |
+| libxml2 | 2.15.4 | MIT | 0 | [libxml2-2.15.4.tar.xz](https://download.gnome.org/sources/libxml2/2.15/libxml2-2.15.4.tar.xz) | `98087fd181d9070724f3fbc65c7377db03038eb92bd882374daff44940138821` |
 
 The same checksums are in [SHA256SUMS](SHA256SUMS) and in the build scripts,
 which refuse an archive that does not match.
@@ -67,6 +68,8 @@ of each file says what it changes and why.
 | `0012-tls-a-certificate-the-caller-trusts-and-the-one-turned-down` | Secure Transport: new option `trusted_cert_sha256` to trust one certificate named by its SHA-256, and a handshake that fails over a certificate returns that certificate's digest as `refused_cert_sha256`. |
 | `0013-http-headers-for-another-host-also-when-tls-is-left` | `headers_elsewhere` also takes effect when a redirect on the same host goes from HTTPS to HTTP. |
 | `0014-rtsp-what-was-sent-before-a-play-is-not-of-it` | RTSP: packets and sender reports a source sent before a PLAY that follows another one are not read as the first of what that PLAY sends, so a seek in a recording that comes as datagrams begins at the place asked for. |
+| `0015-dash-a-manifest-read-leaves-libxml2-to-the-others` | DASH: reading a manifest leaves libxml2's global state alone, so other users of libxml2 in the same process are not disturbed. |
+| `0016-dash-a-live-segment-not-there-yet-is-waited-for` | DASH: a live segment that is listed but not yet there is waited for rather than skipped. |
 
 ### FreeType 2.15.0
 
@@ -157,6 +160,7 @@ library:
 | `LICENSES/FreeType.txt` | FreeType | The FreeType Project License (FTL) |
 | `LICENSES/HarfBuzz.txt` | HarfBuzz | MIT ("Old MIT") |
 | `LICENSES/FriBidi.txt` | FriBidi | GNU Lesser General Public License, version 2.1 |
+| `LICENSES/libxml2.txt` | libxml2 | MIT |
 
 Each patch in `Patches/` is offered under the licence of the library it
 changes.

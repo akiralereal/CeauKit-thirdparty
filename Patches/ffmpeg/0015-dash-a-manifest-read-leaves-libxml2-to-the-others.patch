@@ -1,0 +1,29 @@
+dash: a manifest read leaves libxml2's global state to whoever else uses it
+
+The reader called xmlCleanupParser() after every manifest it parsed,
+the first one and each a live manifest is fetched again for. That
+function frees libxml2's global state: its dictionaries' lock, the key
+each thread's state is kept under, the once-only initialisation. Its own
+documentation says it is not thread-safe, that memory corruption is
+likely when any other thread may call into libxml2, and that it is for
+the moment before a process exits.
+
+A player that plays two DASH sources at once, or one while another is
+looked at, has two demuxers in two threads, each reading a manifest
+when its turn comes. One of them tearing down what the other is using
+is a crash that depends on timing. Since 2.9.11 libxml2 cleans up after
+itself when the process ends, so nothing is leaked by not calling it.
+
+--- a/libavformat/dashdec.c	2026-11-15 20:33:48
++++ b/libavformat/dashdec.c	2026-11-15 20:33:48
+@@ -1431,7 +1431,9 @@
+ cleanup:
+         /*free the document */
+         xmlFreeDoc(doc);
+-        xmlCleanupParser();
++        /* libxml2's global state is left as it is: other demuxers, in
++         * other threads, may be reading a manifest at this moment, and
++         * libxml2 frees its own when the process exits. */
+         xmlFreeNode(mpd_baseurl_node);
+     }
+ 

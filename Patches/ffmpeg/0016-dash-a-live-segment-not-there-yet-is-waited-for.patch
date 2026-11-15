@@ -1,0 +1,76 @@
+dash: a live segment that is not there yet is waited for, not passed over
+
+At the live edge the reader asked for the segment after the last one it
+had read whether or not the manifest listed it yet. With a timeline, a
+segment that is not listed is not made: the server answers 404, the
+reader says "Failed to open fragment of playlist", counts on to the next
+number and asks for that, which is not there either. Within a few
+milliseconds it had run through hundreds of numbers, the playback had
+nothing more to read, and the stream had to be opened again, which
+began it once more at the start of the manifest's window. A reader
+starts a minute behind the end of a timeline, or at its start when it
+lists less, and one whose caller reads ahead comes to the edge.
+
+A segment the manifest does not list, or that the clock says is not
+made yet (a template without a timeline), is now waited for: half a
+segment at a time, as the HLS reader waits half a target duration
+between reloads, with the manifest read again between the waits where
+it is the manifest that lists the segments. The wait ends with the
+interrupt callback, and gives up after max_reload reloads, the option
+that already bounds the reloads of a segment list.
+
+--- a/libavformat/dashdec.c	2026-11-15 20:48:48
++++ b/libavformat/dashdec.c	2026-11-15 20:48:48
+@@ -1653,6 +1653,22 @@
+     return ret;
+ }
+ 
++/* How long to wait before a live manifest is read again for a segment it
++ * does not list yet: half a segment, as a playlist's reader waits half a
++ * target duration, and no less than a tenth of a second. */
++static int64_t segment_wait(const struct representation *pls)
++{
++    int64_t duration = 0;
++
++    if (pls->n_timelines > 0)
++        duration = pls->timelines[pls->n_timelines - 1]->duration;
++    else
++        duration = pls->fragment_duration;
++    if (duration <= 0 || pls->fragment_timescale <= 0)
++        return AV_TIME_BASE;
++    return FFMAX(AV_TIME_BASE / 10, av_rescale(duration, AV_TIME_BASE, 2 * pls->fragment_timescale));
++}
++
+ static struct fragment *get_current_fragment(struct representation *pls)
+ {
+     int64_t min_seq_no = 0;
+@@ -1702,6 +1718,29 @@
+         } else if (pls->cur_seq_no > max_seq_no) {
+             av_log(pls->parent, AV_LOG_VERBOSE, "new fragment: min[%"PRId64"] max[%"PRId64"]\n", min_seq_no, max_seq_no);
+         }
++        /* A segment the manifest does not list yet, or that the clock says
++         * is not made yet, is not there: asked for now it is not found, and
++         * passed over, and the next one with it, as fast as they can be
++         * asked for. It is waited for, the manifest read again meanwhile
++         * where it is the manifest that lists them. */
++        while (pls->cur_seq_no > calc_max_seg_no(pls, c)) {
++            int64_t until;
++
++            if (reload_count++ >= c->max_reload) {
++                av_log(pls->parent, AV_LOG_ERROR,
++                       "Reached max manifest reloads (%d) waiting for seq %"PRId64"\n",
++                       c->max_reload, pls->cur_seq_no);
++                return NULL;
++            }
++            until = av_gettime_relative() + segment_wait(pls);
++            while (av_gettime_relative() < until) {
++                if (ff_check_interrupt(c->interrupt_callback))
++                    return NULL;
++                av_usleep(FFMIN(100000, FFMAX(1, until - av_gettime_relative())));
++            }
++            if (pls->timelines || pls->fragments)
++                refresh_manifest(pls->parent);
++        }
+         seg = av_mallocz(sizeof(struct fragment));
+         if (!seg) {
+             return NULL;
