@@ -92,13 +92,13 @@ fetch_sources() {
 describe_platform() {
     SUFFIX=""
     case "$1" in
-        macos)          SDK=macosx;           OS=macos; MIN_OS=14.0; ARCHS="arm64 x86_64"; PLIST_PLATFORM=MacOSX ;;
-        ios)            SDK=iphoneos;         OS=ios;   MIN_OS=17.0; ARCHS="arm64";        PLIST_PLATFORM=iPhoneOS ;;
-        ios-simulator)  SDK=iphonesimulator;  OS=ios;   MIN_OS=17.0; ARCHS="arm64";        PLIST_PLATFORM=iPhoneSimulator; SUFFIX=-simulator ;;
-        tvos)           SDK=appletvos;        OS=tvos;  MIN_OS=17.0; ARCHS="arm64";        PLIST_PLATFORM=AppleTVOS ;;
-        tvos-simulator) SDK=appletvsimulator; OS=tvos;  MIN_OS=17.0; ARCHS="arm64";        PLIST_PLATFORM=AppleTVSimulator; SUFFIX=-simulator ;;
-        xros)           SDK=xros;             OS=xros;  MIN_OS=1.0;  ARCHS="arm64";        PLIST_PLATFORM=XROS ;;
-        xros-simulator) SDK=xrsimulator;      OS=xros;  MIN_OS=1.0;  ARCHS="arm64";        PLIST_PLATFORM=XRSimulator; SUFFIX=-simulator ;;
+        macos)          SDK=macosx;           OS=macos; MIN_OS=15.0; ARCHS="arm64 x86_64"; PLIST_PLATFORM=MacOSX ;;
+        ios)            SDK=iphoneos;         OS=ios;   MIN_OS=18.0; ARCHS="arm64";        PLIST_PLATFORM=iPhoneOS ;;
+        ios-simulator)  SDK=iphonesimulator;  OS=ios;   MIN_OS=18.0; ARCHS="arm64";        PLIST_PLATFORM=iPhoneSimulator; SUFFIX=-simulator ;;
+        tvos)           SDK=appletvos;        OS=tvos;  MIN_OS=18.0; ARCHS="arm64";        PLIST_PLATFORM=AppleTVOS ;;
+        tvos-simulator) SDK=appletvsimulator; OS=tvos;  MIN_OS=18.0; ARCHS="arm64";        PLIST_PLATFORM=AppleTVSimulator; SUFFIX=-simulator ;;
+        xros)           SDK=xros;             OS=xros;  MIN_OS=2.0;  ARCHS="arm64";        PLIST_PLATFORM=XROS ;;
+        xros-simulator) SDK=xrsimulator;      OS=xros;  MIN_OS=2.0;  ARCHS="arm64";        PLIST_PLATFORM=XRSimulator; SUFFIX=-simulator ;;
         *) die "unknown platform '$1' (known: ${ALL_PLATFORMS[*]})" ;;
     esac
 }

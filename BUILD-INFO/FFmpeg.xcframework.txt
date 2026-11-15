@@ -5,5 +5,5 @@ dav1d 1.5.4, source SHA-256 686616b7c69eb88d44459391ab25cac13b6647a3b288835c5784
 Patches: 
 License: BSD 2-Clause (see LICENSE-dav1d.txt inside each framework)
 Assembler for x86_64: NASM version 3.02 compiled on Jun 29 2026
-Built 2026-11-14T09:57:17Z with Xcode 27.2 Build version 27B52 
+Built 2026-11-15T06:56:48Z with Xcode 27.2 Build version 27B52 
 Configure options: see Scripts/build-ffmpeg.sh at the commit that produced this

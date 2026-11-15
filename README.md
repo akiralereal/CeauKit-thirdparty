@@ -3,7 +3,7 @@
 CeauKit is the playback engine of the app Ceau. Its binaries contain builds of
 six open-source libraries, three of them with changes. This repository holds
 what those builds are made from: the patches, the build scripts, the licence
-texts, and the address and checksum of every upstream source archive.
+texts, and every upstream source archive, with its address and checksum.
 
 CeauKit itself is not in this repository.
 
@@ -39,6 +39,7 @@ The full list of configure options is in
 | `Scripts/privacy-manifest.sh` | Read by both build scripts. Writes each framework's privacy manifest from the symbols its binary imports. |
 | `LICENSES/` | The licence text of each library, one file per library, copied unchanged from its source archive. |
 | `BUILD-INFO/` | A copy of the `BUILD-INFO.txt` each build script wrote into the xcframework it last assembled: versions, checksums, patches, the assembler and the Xcode used, and the time of the build. |
+| `dist/` | The upstream source archives the builds were made from, as they were downloaded: one `.tar.xz` per library. |
 | `SHA256SUMS` | The SHA-256 of each upstream archive. |
 
 ## The patches
@@ -115,7 +116,7 @@ limits a build to four parallel jobs; the default is every core.
 
 Each script looks for its archives in `Vendor/build/src/` and downloads the
 ones that are missing from the addresses in the table above. To build from
-archives you already have, put them there first:
+the copies in this repository, put them there first:
 
 ```bash
 mkdir -p Vendor/build/src && cp dist/*.tar.xz Vendor/build/src/

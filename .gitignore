@@ -2,7 +2,4 @@
 # for CeauKit's Swift package, the unpacked sources and the intermediate files.
 Vendor/
 
-# The upstream source archives, kept beside the repository and not in it.
-dist/
-
 .DS_Store
