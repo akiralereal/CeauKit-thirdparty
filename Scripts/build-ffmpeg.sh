@@ -23,11 +23,24 @@
 # Each framework carries the licences of what is in it and a privacy manifest
 # (Scripts/privacy-manifest.sh), written from what the finished binary calls.
 #
+# A watch plays sound and shows no picture, and its slices are built for
+# that. dav1d is not in them, having no picture to decode. VideoToolbox and
+# AudioToolbox are not asked for where the SDK has no such framework, which
+# is the watch's. Everything else is as in every slice: the containers, the
+# protocols and the decoders, those of pictures too, which the opening of a
+# media uses to learn what its streams are. The watch slice holds two
+# architectures. arm64 is what a watch with an S9 or later runs from
+# watchOS 26, and the compiler makes 26.0 its oldest system whatever it is
+# asked for. arm64_32 is every watch before that, and every watch on watchOS
+# 11 to 25: 64-bit registers with 32-bit pointers, which FFmpeg's
+# hand-written code for arm64 is not written for, so that half is plain C.
+#
 #   Scripts/build-ffmpeg.sh                    every platform
 #   Scripts/build-ffmpeg.sh macos ios          only these (the others are kept
 #                                              from earlier runs, if built)
 #
 # Platforms: macos ios ios-simulator tvos tvos-simulator xros xros-simulator
+#            watchos watchos-simulator
 set -euo pipefail
 
 VERSION=9.0.2
@@ -39,7 +52,7 @@ MESON=1.12.1
 MESON_SHA256=930bc7542cbd9f57009e182fd014eba48cf1a0180a7b9006d2d32d8f168d8b02
 NINJA=1.13.2
 NINJA_SHA256=fd82e26c0706ad4ab88e5fdd26f3fab0a987a90f810160f6c322e752c6af298b
-ALL_PLATFORMS=(macos ios ios-simulator tvos tvos-simulator xros xros-simulator)
+ALL_PLATFORMS=(macos ios ios-simulator tvos tvos-simulator xros xros-simulator watchos watchos-simulator)
 BUNDLE_ID=com.ceaule.ceaukit.ffmpeg
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -134,9 +147,12 @@ install_build_tools() {
     export NINJA="$environment/bin/ninja"
 }
 
-# Sets SDK, OS, MIN_OS, SUFFIX, ARCHS and PLIST_PLATFORM for a platform.
+# Sets SDK, OS, MIN_OS, SUFFIX, ARCHS and PLIST_PLATFORM for a platform, and
+# PICTURE: whether anything there shows a picture. Where nothing does, the
+# libraries that only decode pictures are left out.
 describe_platform() {
     SUFFIX=""
+    PICTURE=yes
     case "$1" in
         macos)          SDK=macosx;           OS=macos; MIN_OS=15.0; ARCHS="arm64 x86_64"; PLIST_PLATFORM=MacOSX ;;
         ios)            SDK=iphoneos;         OS=ios;   MIN_OS=18.0; ARCHS="arm64";        PLIST_PLATFORM=iPhoneOS ;;
@@ -145,6 +161,8 @@ describe_platform() {
         tvos-simulator) SDK=appletvsimulator; OS=tvos;  MIN_OS=18.0; ARCHS="arm64";        PLIST_PLATFORM=AppleTVSimulator; SUFFIX=-simulator ;;
         xros)           SDK=xros;             OS=xros;  MIN_OS=2.0;  ARCHS="arm64";        PLIST_PLATFORM=XROS ;;
         xros-simulator) SDK=xrsimulator;      OS=xros;  MIN_OS=2.0;  ARCHS="arm64";        PLIST_PLATFORM=XRSimulator; SUFFIX=-simulator ;;
+        watchos)           SDK=watchos;        OS=watchos; MIN_OS=11.0; ARCHS="arm64 arm64_32"; PLIST_PLATFORM=WatchOS; PICTURE=no ;;
+        watchos-simulator) SDK=watchsimulator; OS=watchos; MIN_OS=11.0; ARCHS="arm64";          PLIST_PLATFORM=WatchSimulator; SUFFIX=-simulator; PICTURE=no ;;
         *) die "unknown platform '$1' (known: ${ALL_PLATFORMS[*]})" ;;
     esac
 }
@@ -197,9 +215,14 @@ EOF
 
 # FFmpeg looks for dav1d through pkg-config and no other way. This stands in
 # for pkg-config and knows that one library, so nothing installed on this Mac
-# can be found by mistake.
+# can be found by mistake. Without a prefix it knows no library at all.
 write_pkg_config() {
-    local path="$1" prefix="$2"
+    local path="$1" prefix="${2:-}"
+    if [[ -z "$prefix" ]]; then
+        printf '#!/bin/sh\n[ "$1" = --version ] && echo 0.29.2 && exit 0\nexit 1\n' > "$path"
+        chmod +x "$path"
+        return
+    fi
     cat > "$path" <<EOF
 #!/bin/sh
 known="" answer=""
@@ -227,17 +250,34 @@ compile() {
     # The toolchain's clang has no default SDK, so the tools FFmpeg builds to
     # run on this Mac during the build need theirs spelled out too.
     local host_flags="-isysroot $(xcrun -sdk macosx --show-sdk-path)"
-    local extra=()
+    local extra=() ffmpeg_arch="$arch" framework system_decoders=() picture_decoders=()
     if [[ "$arch" == x86_64 ]] && ! command -v nasm >/dev/null; then
         # Hardware decoding is unaffected; software decoding on Intel Macs is
         # slower without the hand-written assembly. `brew install nasm` to get it.
         echo "note: nasm not found, building x86_64 without assembly"
         extra+=(--disable-x86asm)
     fi
+    if [[ "$arch" == arm64_32 ]]; then
+        # 64-bit registers, 32-bit pointers. FFmpeg's code for arm64 takes a
+        # pointer to fill its register, and here the upper half of one that
+        # holds a pointer is not defined. FFmpeg has no name for this
+        # architecture either: left to itself it takes the name for 32-bit
+        # ARM, whose code is another instruction set. So it is told of no
+        # architecture, and builds what is written in C.
+        ffmpeg_arch=generic
+        extra+=(--disable-asm)
+    fi
+    # The system's decoders, where the SDK has the framework they are in.
+    for framework in VideoToolbox AudioToolbox; do
+        if [[ -d "$sdk_path/System/Library/Frameworks/$framework.framework" ]]; then
+            system_decoders+=("--enable-$(tr '[:upper:]' '[:lower:]' <<< "$framework")")
+        fi
+    done
+    [[ "$PICTURE" == yes ]] && picture_decoders+=(--enable-libdav1d)
 
     local options=(
         --prefix="$build_dir/install"
-        --enable-cross-compile --target-os=darwin --arch="$arch"
+        --enable-cross-compile --target-os=darwin --arch="$ffmpeg_arch"
         --cc="$cc" --host-cc="$(xcrun -sdk macosx -f clang)"
         --extra-cflags="$flags" --extra-ldflags="$flags"
         --host-cflags="$host_flags" --host-ldflags="$host_flags"
@@ -246,9 +286,9 @@ compile() {
         --disable-programs --disable-doc --disable-debug
         --disable-avdevice --disable-encoders --disable-muxers
         --disable-autodetect --enable-pthreads
-        --enable-videotoolbox --enable-audiotoolbox --enable-securetransport
+        ${system_decoders[@]+"${system_decoders[@]}"} --enable-securetransport
         --enable-zlib --enable-bzlib --enable-iconv
-        --enable-libdav1d
+        ${picture_decoders[@]+"${picture_decoders[@]}"}
         --disable-filters
         --enable-filter=bwdif,yadif,scale,format,null,anull,aresample,aformat,volume,acompressor,dynaudnorm,loudnorm
         ${extra[@]+"${extra[@]}"}
@@ -264,8 +304,12 @@ compile() {
 
     rm -rf "$build_dir"
     mkdir -p "$build_dir/obj"
-    compile_dav1d "$build_dir" "$arch" "$triple" "$sdk_path" "$cc"
-    write_pkg_config "$build_dir/pkg-config" "$build_dir/dav1d/install"
+    if [[ "$PICTURE" == yes ]]; then
+        compile_dav1d "$build_dir" "$arch" "$triple" "$sdk_path" "$cc"
+        write_pkg_config "$build_dir/pkg-config" "$build_dir/dav1d/install"
+    else
+        write_pkg_config "$build_dir/pkg-config"
+    fi
 
     cd "$build_dir/obj"
     "$SOURCE/configure" "${options[@]}" > configure.log 2>&1 \
@@ -279,12 +323,22 @@ compile() {
 
     grep -q '^#define CONFIG_GPL 0' config.h && grep -q '^#define CONFIG_NONFREE 0' config.h \
         || die "$triple was configured with GPL or nonfree parts"
-    grep -q '^#define CONFIG_LIBDAV1D_DECODER 1' config_components.h \
-        || die "$triple was configured without dav1d"
+    if [[ "$PICTURE" == yes ]]; then
+        grep -q '^#define CONFIG_LIBDAV1D_DECODER 1' config_components.h \
+            || die "$triple was configured without dav1d"
+        grep -q '^#define CONFIG_VIDEOTOOLBOX 1' config.h \
+            || die "$triple was configured without VideoToolbox"
+    else
+        grep -q '^#define CONFIG_LIBDAV1D_DECODER 0' config_components.h \
+            || die "$triple was configured with dav1d, and shows no picture"
+    fi
     # The hand-written code is what makes software decoding quick enough to
     # watch. A build that was meant to have it and has not is not a build.
     if [[ "$arch" == arm64 ]]; then
         grep -q '^#define HAVE_NEON 1' config.h || die "$triple was configured without its assembly"
+    elif [[ "$arch" == arm64_32 ]]; then
+        grep -q '^#define ARCH_AARCH64 0' config.h && grep -q '^#define ARCH_ARM 0' config.h \
+            || die "$triple was configured with the assembly of another architecture"
     elif [[ " ${options[*]} " != *" --disable-x86asm "* ]]; then
         grep -q '^#define HAVE_X86ASM 1' config.h || die "$triple was configured without its assembly"
     fi
@@ -328,10 +382,11 @@ system_libraries() {
 # in as what FFmpeg's decoder for it calls, and none of it is exported.
 link_dylib() {
     local build_dir="$1" triple="$2" sdk_path="$3" cc="$4" install_name="$5"
-    local prefix="$build_dir/install" lib archives=()
+    local prefix="$build_dir/install" lib archives=() dav1d=()
     for lib in libavformat libavcodec libavfilter libswresample libswscale libavutil; do
         archives+=("$prefix/lib/$lib.a")
     done
+    [[ "$PICTURE" == yes ]] && dav1d=("$build_dir/dav1d/install/lib/libdav1d.a")
 
     local exports="$build_dir/exports.txt" roots="$build_dir/roots.rsp"
     nm -gU "${archives[@]}" 2>/dev/null \
@@ -346,7 +401,7 @@ link_dylib() {
     # shellcheck disable=SC2046
     "$cc" -dynamiclib -target "$triple" -isysroot "$sdk_path" \
         "@$roots" -Wl,-exported_symbols_list,"$exports" \
-        "${archives[@]}" "$build_dir/dav1d/install/lib/libdav1d.a" \
+        "${archives[@]}" ${dav1d[@]+"${dav1d[@]}"} \
         $(system_libraries "$prefix") -liconv \
         -install_name "$install_name" \
         -compatibility_version 1 -current_version "$VERSION" \
@@ -354,8 +409,11 @@ link_dylib() {
 }
 
 write_info_plist() {
-    local path="$1" minimum_key
+    local path="$1" minimum_key family=""
     [[ "$OS" == macos ]] && minimum_key=LSMinimumSystemVersion || minimum_key=MinimumOSVersion
+    # What Xcode writes into a framework for a watch, and what an upload is
+    # held against there.
+    [[ "$OS" == watchos ]] && family=$'\n    <key>UIDeviceFamily</key><array><integer>4</integer></array>'
     cat > "$path" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -370,7 +428,7 @@ write_info_plist() {
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key><string>$VERSION</string>
     <key>CFBundleSupportedPlatforms</key><array><string>$PLIST_PLATFORM</string></array>
-    <key>$minimum_key</key><string>$MIN_OS</string>
+    <key>$minimum_key</key><string>$MIN_OS</string>$family
 </dict>
 </plist>
 EOF
@@ -388,7 +446,11 @@ build_platform() {
     [[ "$OS" == macos ]] && install_name="@rpath/FFmpeg.framework/Versions/A/FFmpeg"
 
     for arch in $ARCHS; do
-        local triple="$arch-apple-$OS$MIN_OS$SUFFIX" build_dir="$WORK/$platform/$arch"
+        local minimum="$MIN_OS"
+        # A watch runs arm64 from watchOS 26. The compiler writes that into
+        # the binary whatever it is asked for; it is asked for what is so.
+        [[ "$platform" == watchos && "$arch" == arm64 ]] && minimum=26.0
+        local triple="$arch-apple-$OS$minimum$SUFFIX" build_dir="$WORK/$platform/$arch"
         log "$platform: compiling $triple"
         compile "$build_dir" "$arch" "$triple" "$sdk_path" "$cc"
         link_dylib "$build_dir" "$triple" "$sdk_path" "$cc" "$install_name"
@@ -412,7 +474,7 @@ build_platform() {
     write_info_plist "$resources/Info.plist"
     # The licences travel with the binary.
     cp "$SOURCE/COPYING.LGPLv2.1" "$resources/"
-    cp "$DAV1D_SOURCE/COPYING" "$resources/LICENSE-dav1d.txt"
+    [[ "$PICTURE" == yes ]] && cp "$DAV1D_SOURCE/COPYING" "$resources/LICENSE-dav1d.txt"
     lipo -create "${dylibs[@]}" -output "$content/FFmpeg"
     strip -x "$content/FFmpeg" 2>/dev/null
     verify_binary "$content/FFmpeg" "$platform"
@@ -487,9 +549,10 @@ assemble_xcframework() {
         echo "FFmpeg $VERSION, source SHA-256 $SHA256"
         echo "Patches: $(cd "$ROOT/Patches/ffmpeg" 2>/dev/null && ls *.patch 2>/dev/null | tr '\n' ' ')"
         echo "License: LGPL version 2.1 or later (see COPYING.LGPLv2.1 inside each framework)"
-        echo "dav1d $DAV1D, source SHA-256 $DAV1D_SHA256, linked in statically"
+        echo "dav1d $DAV1D, source SHA-256 $DAV1D_SHA256, linked in statically, in every slice but the watch's"
         echo "Patches: $(cd "$ROOT/Patches/dav1d" 2>/dev/null && ls *.patch 2>/dev/null | tr '\n' ' ')"
-        echo "License: BSD 2-Clause (see LICENSE-dav1d.txt inside each framework)"
+        echo "License: BSD 2-Clause (see LICENSE-dav1d.txt inside each framework that has it)"
+        echo "watchOS: sound alone. No dav1d, no VideoToolbox, no AudioToolbox; arm64_32 without assembly"
         echo "Assembler for x86_64: $(nasm --version 2>/dev/null || echo "none, so no x86 assembly")"
         echo "Built $(date -u +%Y-%m-%dT%H:%M:%SZ) with $(xcodebuild -version | tr '\n' ' ')"
         echo "Configure options: see Scripts/build-ffmpeg.sh at the commit that produced this"

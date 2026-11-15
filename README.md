@@ -11,7 +11,8 @@ CeauKit itself is not in this repository.
 
 Two dynamic frameworks are built. `FFmpeg.framework` contains FFmpeg, with
 dav1d linked into it statically. `Libass.framework` contains libass, FreeType,
-HarfBuzz and FriBidi.
+HarfBuzz and FriBidi. For watchOS only FFmpeg is built, without dav1d: a
+watch plays sound alone.
 
 | Library | Version | Licence | Patches | Upstream archive | SHA-256 of the archive |
 | --- | --- | --- | --- | --- | --- |
@@ -110,7 +111,8 @@ Scripts/build-libass.sh
 
 With no arguments each script builds every platform: `macos` (arm64 and
 x86_64), `ios`, `ios-simulator`, `tvos`, `tvos-simulator`, `xros`,
-`xros-simulator` (arm64). Naming platforms builds only those, for example
+`xros-simulator` (arm64); `build-ffmpeg.sh` also `watchos` (arm64 and
+arm64_32) and `watchos-simulator`. Naming platforms builds only those, for example
 `Scripts/build-ffmpeg.sh macos ios`. `CEAUKIT_JOBS=4` in the environment
 limits a build to four parallel jobs; the default is every core.
 
