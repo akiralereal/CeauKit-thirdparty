@@ -1,10 +1,10 @@
 FFmpeg 9.0.2, source SHA-256 8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
-Patches: 0001-videotoolbox-build-for-visionos.patch 0002-http-proxy-option-holds-and-407-has-a-code.patch 0003-hls-seek-past-a-discontinuity.patch 0004-hls-a-ranged-request-is-counted-from-where-it-begins.patch 0005-http-headers-for-another-host.patch 0006-a-seek-the-source-turns-down-fails-and-says-why.patch 0007-http-a-body-sent-as-bare-deflate-is-read.patch 0008-tls-a-failed-handshake-says-what-stood-in-the-way.patch 0009-hls-a-playlist-that-starts-over-is-joined-again.patch 0010-hls-a-segment-in-hand-is-read-under-its-own-number.patch 0011-http-a-seek-lets-go-of-its-connection-first.patch 0012-tls-a-certificate-the-caller-trusts-and-the-one-turned-down.patch 0013-http-headers-for-another-host-also-when-tls-is-left.patch 
+Patches: 0001-videotoolbox-build-for-visionos.patch 0002-http-proxy-option-holds-and-407-has-a-code.patch 0003-hls-seek-past-a-discontinuity.patch 0004-hls-a-ranged-request-is-counted-from-where-it-begins.patch 0005-http-headers-for-another-host.patch 0006-a-seek-the-source-turns-down-fails-and-says-why.patch 0007-http-a-body-sent-as-bare-deflate-is-read.patch 0008-tls-a-failed-handshake-says-what-stood-in-the-way.patch 0009-hls-a-playlist-that-starts-over-is-joined-again.patch 0010-hls-a-segment-in-hand-is-read-under-its-own-number.patch 0011-http-a-seek-lets-go-of-its-connection-first.patch 0012-tls-a-certificate-the-caller-trusts-and-the-one-turned-down.patch 0013-http-headers-for-another-host-also-when-tls-is-left.patch 0014-rtsp-what-was-sent-before-a-play-is-not-of-it.patch 
 License: LGPL version 2.1 or later (see COPYING.LGPLv2.1 inside each framework)
 dav1d 1.5.4, source SHA-256 686616b7c69eb88d44459391ab25cac13b6647a3b288835c5784e71c1514a5c5, linked in statically, in every slice but the watch's
 Patches: 
 License: BSD 2-Clause (see LICENSE-dav1d.txt inside each framework that has it)
 watchOS: sound alone. No dav1d, no VideoToolbox, no AudioToolbox; arm64_32 without assembly
 Assembler for x86_64: NASM version 3.02 compiled on Jun 29 2026
-Built 2026-11-15T08:30:57Z with Xcode 27.2 Build version 27B52 
+Built 2026-11-15T11:16:27Z with Xcode 27.2 Build version 27B52 
 Configure options: see Scripts/build-ffmpeg.sh at the commit that produced this

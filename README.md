@@ -16,7 +16,7 @@ watch plays sound alone.
 
 | Library | Version | Licence | Patches | Upstream archive | SHA-256 of the archive |
 | --- | --- | --- | --- | --- | --- |
-| FFmpeg | 9.0.2 | LGPL 2.1 or later | 13 | [ffmpeg-9.0.2.tar.xz](https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz) | `8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e` |
+| FFmpeg | 9.0.2 | LGPL 2.1 or later | 14 | [ffmpeg-9.0.2.tar.xz](https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz) | `8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e` |
 | dav1d | 1.5.4 | BSD 2-Clause | 0 | [dav1d-1.5.4.tar.xz](https://downloads.videolan.org/pub/videolan/dav1d/1.5.4/dav1d-1.5.4.tar.xz) | `686616b7c69eb88d44459391ab25cac13b6647a3b288835c5784e71c1514a5c5` |
 | libass | 0.17.5 | ISC | 1 | [libass-0.17.5.tar.xz](https://github.com/libass/libass/releases/download/0.17.5/libass-0.17.5.tar.xz) | `2dca25c0e0c837ddf00b52011b3f82cac1e4ddd3ad018227806b0c2288864acc` |
 | FreeType | 2.15.0 | FreeType License (FTL) | 2 | [freetype-2.15.0.tar.xz](https://download.savannah.gnu.org/releases/freetype/freetype-2.15.0.tar.xz) | `93cd47eb719c325107f2d3cf087d06299e944c3b48a40b55537302304dea1dd5` |
@@ -66,6 +66,7 @@ of each file says what it changes and why.
 | `0011-http-a-seek-lets-go-of-its-connection-first` | An HTTP seek closes the connection it has before it opens the next, for sources that allow a client one connection. |
 | `0012-tls-a-certificate-the-caller-trusts-and-the-one-turned-down` | Secure Transport: new option `trusted_cert_sha256` to trust one certificate named by its SHA-256, and a handshake that fails over a certificate returns that certificate's digest as `refused_cert_sha256`. |
 | `0013-http-headers-for-another-host-also-when-tls-is-left` | `headers_elsewhere` also takes effect when a redirect on the same host goes from HTTPS to HTTP. |
+| `0014-rtsp-what-was-sent-before-a-play-is-not-of-it` | RTSP: packets and sender reports a source sent before a PLAY that follows another one are not read as the first of what that PLAY sends, so a seek in a recording that comes as datagrams begins at the place asked for. |
 
 ### FreeType 2.15.0
 

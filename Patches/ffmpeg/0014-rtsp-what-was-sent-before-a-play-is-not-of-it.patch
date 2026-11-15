@@ -1,0 +1,202 @@
+rtsp: what was sent before a PLAY is not read as part of what it sends
+
+A PLAY that follows another one in a session, after a seek or a pause,
+is answered while packets the source sent before it was told are still
+on their way. Inside the connection they are thrown away with whatever
+else arrives before the answer. As datagrams they arrive after it, and
+are read as the first packets of the new place: timed by the clock the
+answer set, which puts them before the place that was asked for, by as
+much as the source's RTP clock moved between the two. A seek forward in
+a recording then begins with a keyframe and some sound of the place that
+was left, and a gap behind them.
+
+The answer says which packet is the first it sends (RTP-Info, seq), so
+that a client can tell the two apart. That was parsed and not used. A
+packet from before that sequence number is now dropped, for a second
+after the answer, which is longer than a datagram is under way. It is
+looked for only after a PLAY that follows another: before the first of
+a session nothing was sent, and a source that states a wrong number
+there costs nothing. One that states a wrong number later costs that
+second and no more.
+
+A sender report can be on its way in the same manner, and does more
+harm when it is: the first report read after a PLAY is what the times
+of everything the PLAY sends are counted from. A source may set its RTP
+clock anew with a PLAY, which is what the answer's rtptime is there to
+say, and a report made before it then puts the whole of the new place
+at the wrong time, by as much as the clock was moved. A report has no
+sequence number. It is told by its RTP time, which for one made before
+the PLAY is before the rtptime the answer gave, and is passed over for
+the same second. The times are then counted from the answer alone until
+the next report comes, as they are while none has come yet.
+
+--- a/libavformat/rtpdec.c
++++ b/libavformat/rtpdec.c
+@@ -192,6 +192,20 @@
+                 return AVERROR_INVALIDDATA;
+             }
+ 
++            if (s->first_rtptime_until) {
++                /* The first report read after a PLAY is what the times
++                 * of what it sends are counted from. One that was made
++                 * before the PLAY, and was still on its way when it was
++                 * answered, says how the source's clock stood for the
++                 * place it was at until then: a source may set its RTP
++                 * clock anew with a PLAY, which is why the answer states
++                 * where it begins. */
++                if (av_gettime_relative() >= s->first_rtptime_until)
++                    s->first_rtptime_until = 0;
++                else if ((int32_t)(AV_RB32(buf + 16) - s->first_rtptime) < 0)
++                    break;
++            }
++
+             s->last_sr.ssrc = AV_RB32(buf + 4);
+             s->last_sr.ntp_timestamp = AV_RB64(buf + 8);
+             s->last_sr.rtp_timestamp = AV_RB32(buf + 16);
+@@ -769,6 +783,8 @@
+     s->seq       = 0;
+     s->queue_len = 0;
+     s->prev_ret  = 0;
++    s->first_seq_until = 0;
++    s->first_rtptime_until = 0;
+ }
+ 
+ static int enqueue_packet(RTPDemuxContext *s, uint8_t *buf, int len)
+@@ -871,6 +887,17 @@
+         return rtcp_parse_packet(s, buf, len);
+     }
+ 
++    if (s->first_seq_until) {
++        /* The source said which packet is the first of what it sends for
++         * the PLAY it was last told. One from before that was sent for
++         * the place the source was at until then, and was still on its
++         * way when the PLAY was answered. */
++        int16_t diff = AV_RB16(buf + 2) - s->first_seq;
++        if (diff < 0 && av_gettime_relative() < s->first_seq_until)
++            return -1;
++        s->first_seq_until = 0;
++    }
++
+     if (s->st) {
+         int64_t received = av_gettime_relative();
+         uint32_t arrival_ts = av_rescale_q(received, AV_TIME_BASE_Q,
+--- a/libavformat/rtpdec.h
++++ b/libavformat/rtpdec.h
+@@ -155,6 +155,16 @@
+     uint32_t base_timestamp;
+     int64_t  unwrapped_timestamp;
+     int64_t  range_start_offset;
++    /* The sequence number the answer to a PLAY gave for the first packet
++     * of what it sends, and until when a packet from before it is taken
++     * for one that was sent before that PLAY: 0 when none is looked for. */
++    uint16_t first_seq;
++    int64_t  first_seq_until;
++    /* The RTP time that answer gave for its first packet, and until when
++     * a sender report from before it is taken for one that was made
++     * before that PLAY: 0 when none is looked for. */
++    uint32_t first_rtptime;
++    int64_t  first_rtptime_until;
+     int max_payload_size;
+     /* used to send back RTCP RR */
+     char hostname[256];
+--- a/libavformat/rtsp.c
++++ b/libavformat/rtsp.c
+@@ -1074,9 +1074,13 @@
+             break;
+     }
+ }
++
++/* How long after a PLAY was answered a packet may still arrive that was
++ * sent before it, in microseconds. */
++#define RTP_INFO_PATIENCE 1000000
+ 
+ static void handle_rtp_info(RTSPState *rt, const char *url,
+-                            uint32_t seq, uint32_t rtptime)
++                            uint32_t seq, int has_seq, uint32_t rtptime)
+ {
+     int i;
+     if (!rtptime || !url[0])
+@@ -1090,6 +1094,24 @@
+             continue;
+         if (!strcmp(rtsp_st->control_url, url)) {
+             rtpctx->base_timestamp = rtptime;
++            /* A PLAY that follows another, after a seek or a pause: what
++             * the source sent before it was told may arrive after the
++             * answer, as datagrams do, and would be given the times of
++             * the place the source was sent to. The sequence number is
++             * stated so that a client can tell the two apart. Before the
++             * first PLAY of a session nothing was sent, and nothing is
++             * looked for. */
++            if (rt->has_played) {
++                int64_t until = av_gettime_relative() + RTP_INFO_PATIENCE;
++                if (has_seq) {
++                    rtpctx->first_seq       = seq;
++                    rtpctx->first_seq_until = until;
++                }
++                /* The same holds for a sender report, which has no
++                 * sequence number and is told by its RTP time. */
++                rtpctx->first_rtptime       = rtptime;
++                rtpctx->first_rtptime_until = until;
++            }
+             break;
+         }
+     }
+@@ -1100,6 +1122,7 @@
+     int read = 0;
+     char key[20], value[MAX_URL_SIZE], url[MAX_URL_SIZE] = "";
+     uint32_t seq = 0, rtptime = 0;
++    int has_seq = 0;
+ 
+     for (;;) {
+         p += strspn(p, SPACE_CHARS);
+@@ -1113,21 +1136,23 @@
+         read++;
+         if (!strcmp(key, "url"))
+             av_strlcpy(url, value, sizeof(url));
+-        else if (!strcmp(key, "seq"))
++        else if (!strcmp(key, "seq")) {
+             seq = strtoul(value, NULL, 10);
+-        else if (!strcmp(key, "rtptime"))
++            has_seq = 1;
++        } else if (!strcmp(key, "rtptime"))
+             rtptime = strtoul(value, NULL, 10);
+         if (*p == ',') {
+-            handle_rtp_info(rt, url, seq, rtptime);
++            handle_rtp_info(rt, url, seq, has_seq, rtptime);
+             url[0] = '\0';
+             seq = rtptime = 0;
++            has_seq = 0;
+             read = 0;
+         }
+         if (*p)
+             p++;
+     }
+     if (read > 0)
+-        handle_rtp_info(rt, url, seq, rtptime);
++        handle_rtp_info(rt, url, seq, has_seq, rtptime);
+ }
+ 
+ void ff_rtsp_parse_line(AVFormatContext *s,
+--- a/libavformat/rtsp.h
++++ b/libavformat/rtsp.h
+@@ -245,6 +245,10 @@
+      * whenever we resume playback. Either way, the value is only used once,
+      * see rtsp_read_play() and rtsp_read_seek(). */
+     int64_t seek_timestamp;
++
++    /** A PLAY of this session has been answered: what the source sent for
++     *  it may still be on its way when the next one is answered. */
++    int has_played;
+ 
+     int seq;                          /**< RTSP command sequence number */
+ 
+--- a/libavformat/rtspdec.c
++++ b/libavformat/rtspdec.c
+@@ -574,6 +574,7 @@
+         if (reply->status_code != RTSP_STATUS_OK) {
+             return ff_rtsp_averror(reply->status_code, -1);
+         }
++        rt->has_played = 1;
+         if (rt->transport == RTSP_TRANSPORT_RTP &&
+             reply->range_start != AV_NOPTS_VALUE) {
+             for (i = 0; i < rt->nb_rtsp_streams; i++) {
