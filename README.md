@@ -16,7 +16,7 @@ watch plays sound alone.
 
 | Library | Version | Licence | Patches | Upstream archive | SHA-256 of the archive |
 | --- | --- | --- | --- | --- | --- |
-| FFmpeg | 9.0.2 | LGPL 2.1 or later | 16 | [ffmpeg-9.0.2.tar.xz](https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz) | `8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e` |
+| FFmpeg | 9.0.2 | LGPL 2.1 or later | 17 | [ffmpeg-9.0.2.tar.xz](https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz) | `8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e` |
 | dav1d | 1.5.4 | BSD 2-Clause | 0 | [dav1d-1.5.4.tar.xz](https://downloads.videolan.org/pub/videolan/dav1d/1.5.4/dav1d-1.5.4.tar.xz) | `686616b7c69eb88d44459391ab25cac13b6647a3b288835c5784e71c1514a5c5` |
 | libass | 0.17.5 | ISC | 1 | [libass-0.17.5.tar.xz](https://github.com/libass/libass/releases/download/0.17.5/libass-0.17.5.tar.xz) | `2dca25c0e0c837ddf00b52011b3f82cac1e4ddd3ad018227806b0c2288864acc` |
 | FreeType | 2.15.0 | FreeType License (FTL) | 2 | [freetype-2.15.0.tar.xz](https://download.savannah.gnu.org/releases/freetype/freetype-2.15.0.tar.xz) | `93cd47eb719c325107f2d3cf087d06299e944c3b48a40b55537302304dea1dd5` |
@@ -70,6 +70,7 @@ of each file says what it changes and why.
 | `0014-rtsp-what-was-sent-before-a-play-is-not-of-it` | RTSP: packets and sender reports a source sent before a PLAY that follows another one are not read as the first of what that PLAY sends, so a seek in a recording that comes as datagrams begins at the place asked for. |
 | `0015-dash-a-manifest-read-leaves-libxml2-to-the-others` | DASH: reading a manifest leaves libxml2's global state alone, so other users of libxml2 in the same process are not disturbed. |
 | `0016-dash-a-live-segment-not-there-yet-is-waited-for` | DASH: a live segment that is listed but not yet there is waited for rather than skipped. |
+| `0017-hls-subtitles-in-playlists-of-their-own` | HLS: a subtitle rendition's playlist is fetched when its stream is first wanted, not at the opening. Its WebVTT cues are placed by `X-TIMESTAMP-MAP` (new WebVTT option `timestamp_map`). New HLS option `subtitles_from` starts a newly wanted playlist at the time shown. A cue still up at a seek is kept, and a failed subtitle segment or playlist costs only its subtitles. |
 
 ### FreeType 2.15.0
 

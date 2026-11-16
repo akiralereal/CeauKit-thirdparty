@@ -1,0 +1,627 @@
+hls: subtitles in playlists of their own, read when wanted and in time
+
+A master playlist names its subtitles as renditions (EXT-X-MEDIA,
+TYPE=SUBTITLES), each a playlist of WebVTT segments. The reader made a
+stream for each and read its segments once the stream was wanted. This
+is what stood between that and subtitles a player can show.
+
+Every one of those playlists was fetched while the media was opened,
+one request after the other, before the first packet: a programme with
+eight languages of subtitles opened eight requests later, whether
+anyone wanted subtitles or not. What the stream is, is known without
+the playlist. It is fetched when its stream is first wanted; one that
+will not come is asked for again two seconds later and costs nothing
+but its subtitles.
+
+Each WebVTT segment says, in an X-TIMESTAMP-MAP, which timestamp of the
+other segments its cue times stand for (RFC 8216, 3.5). The WebVTT
+reader passed the header over, so that cues of a programme whose
+timestamps begin at ten seconds, as they commonly do, came ten seconds
+early. The reader has an option, timestamp_map, which the HLS reader
+sets for its segments: the cue times are moved by what the header says.
+Without a header they are the timestamps themselves, as the RFC has
+it. A timestamp of 33 bits starts over every twenty-six and a half
+hours, and the cue times with it, while the other streams are carried
+on past that by their demuxers: a cue is put within half a round of
+what was last read.
+
+A playlist wanted from now on started at the time last read, which is
+ahead of the time shown by all that waits to be played: the cue that is
+up at that moment and those of the next seconds were never seen. The
+caller says what is shown (subtitles_from, in microseconds), and the
+playlist starts there, also one that is wanted still and is to be read
+again. A cue that began before the time asked for and is still up at it
+is passed on, after a seek too: it is judged by its end.
+
+The reader took the first cue it read for where the subtitles'
+playlist begins in time, and after a seek asked for cues that much
+later than the time sought: with a first cue five seconds into the
+film, the cues of the five seconds after every seek were let go of. A
+cue says nothing of where its playlist begins, nor of how far the
+reading has got: the time last read is not taken from one either, and
+neither is the number of the segment the other playlists are at.
+
+A cue that is still up when its segment ends is in the next segment
+too. It was passed on twice, and the second time with a timestamp that
+goes backwards. It is passed on once.
+
+A segment that could not be had, or a playlist that could not be
+fetched again, was an error of the whole media. It costs its cues.
+
+The segments were read on end until one held a cue: through a quarter
+of an hour in which nobody speaks, a hundred and fifty requests with
+nothing else read meanwhile. A segment of a list that is complete is
+read when the other playlists have been read to where it begins. Each
+was fetched over a connection of its own; the connection is kept for
+the next where connections are kept, as the other playlists keep theirs.
+
+Waiting at the end of a live list, the playlist counted every packet
+of the other playlists as a fetch that had brought nothing new, and
+after m3u8_hold_counters of them, a quarter of a minute of a channel,
+was taken to have ended for good. And every segment was read through a
+buffer of its own that nothing let go of, 32 kB a segment.
+
+--- a/libavformat/hls.c
++++ b/libavformat/hls.c
+@@ -33,6 +33,7 @@
+ #include "libavutil/aes.h"
+ #include "libavutil/avstring.h"
+ #include "libavutil/avassert.h"
++#include "libavutil/crc.h"
+ #include "libavutil/intreadwrite.h"
+ #include "libavutil/mathematics.h"
+ #include "libavutil/mem.h"
+@@ -96,6 +97,15 @@
+     PLS_TYPE_VOD
+ };
+ 
++/* A cue that is still up when its segment ends is in the next segment
++ * too (RFC 8216, 3.5). It is told by this, and passed on once. */
++#define MAX_CUE_MARKS 32
++struct cue_mark {
++    int64_t pts;
++    int64_t duration;
++    uint32_t sum;
++};
++
+ /*
+  * Each playlist has its own demuxer. If it currently is active,
+  * it has an open AVIOContext too, and potentially an AVPacket
+@@ -185,6 +195,15 @@
+     int n_init_sections;
+     struct segment **init_sections;
+     int is_subtitle; /* Indicates if it's a subtitle playlist */
++    /* A playlist of subtitles that has not been fetched yet: it is when
++     * its subtitles are first wanted. */
++    int not_loaded;
++    /* After a fetch of it that failed: not asked for again before this. */
++    int64_t wait_until;
++    /* The cues of the subtitle segment read before this one, and of this
++     * one so far, by their times and a sum of their text. */
++    struct cue_mark cues_before[MAX_CUE_MARKS], cues_now[MAX_CUE_MARKS];
++    int n_cues_before, n_cues_now;
+ 
+     /* Some HLS streams repeat the current timed-ID3 metadata at every segment
+      * boundary so late-joining clients get a fresh copy. Track the last seen
+@@ -240,6 +259,9 @@
+     int64_t first_timestamp;
+     struct playlist *first_timestamp_pls;
+     int64_t cur_timestamp;
++    /* Where a playlist of subtitles that is wanted from the next read on
++     * starts: the time being shown, which is behind the time read. */
++    int64_t subtitles_from;
+     /* After a seek past a discontinuity: what is added to every timestamp
+      * to put it on the playlist's own time, and whether it is still to be
+      * measured from the first packet read. */
+@@ -1815,7 +1837,12 @@
+             v->last_seq_no = v->cur_seq_no;
+             v->m3u8_hold_counters = 0;
+         } else if (v->last_seq_no == v->cur_seq_no) {
+-            v->m3u8_hold_counters++;
++            /* A playlist of subtitles that waits at the end of its list
++             * comes by here with every packet of the other playlists, not
++             * once for every fetch that brought nothing new: counted, it
++             * would be taken to have ended after a quarter of a minute. */
++            if (!v->is_subtitle)
++                v->m3u8_hold_counters++;
+             if (v->m3u8_hold_counters >= c->m3u8_hold_counters) {
+                 return AVERROR_EOF;
+             }
+@@ -1972,7 +1999,7 @@
+         seg = current_segment(v);
+     }
+ 
+-    if (!v->input) {
++    if (!v->input || v->input_read_done) {
+         ret = open_input(c, v, seg, &v->input);
+         if (ret < 0) {
+             if (ff_check_interrupt(c->interrupt_callback))
+@@ -1981,6 +2008,7 @@
+                    v->index);
+             return ret;
+         }
++        v->input_read_done = 0;
+     }
+ 
+     return read_from_url(v, seg, buf, buf_size);
+@@ -2006,6 +2034,9 @@
+     if (!(pls->ctx = avformat_alloc_context()))
+         return AVERROR(ENOMEM);
+ 
++    /* The buffer the segment before this one was read through: nothing
++     * else lets go of it, and there is one for every segment. */
++    av_freep(&pls->pb.pub.buffer);
+     pls->read_buffer = av_malloc(INITIAL_BUFFER_SIZE);
+     if (!pls->read_buffer) {
+         avformat_free_context(pls->ctx);
+@@ -2025,38 +2056,142 @@
+ 
+     in_fmt = av_find_input_format("webvtt");
+     av_dict_copy(&opts, c->seg_format_opts, 0);
++    /* Each segment says where its cue times are on the clock of the
++     * other segments. */
++    av_dict_set(&opts, "timestamp_map", "1", 0);
+     ret = avformat_open_input(&pls->ctx, current_segment(pls)->url, in_fmt, &opts);
+     av_dict_free(&opts);
+ 
+     return ret;
++}
++
++/* Whether this cue was in the segment before the one it is read from. It
++ * is noted as one of this segment's either way: a cue that stays up over
++ * three segments is in all three. */
++static int cue_was_read(struct playlist *v, const AVPacket *pkt)
++{
++    struct cue_mark mark = { pkt->pts, pkt->duration,
++        av_crc(av_crc_get_table(AV_CRC_32_IEEE), 0, pkt->data, pkt->size) };
++    int i, found = 0;
++
++    for (i = 0; i < v->n_cues_before && !found; i++)
++        found = v->cues_before[i].pts == mark.pts &&
++                v->cues_before[i].duration == mark.duration &&
++                v->cues_before[i].sum == mark.sum;
++    if (v->n_cues_now < MAX_CUE_MARKS)
++        v->cues_now[v->n_cues_now++] = mark;
++    return found;
++}
++
++/* A timestamp of a transport stream is 33 bits long and starts over every
++ * twenty-six and a half hours. The other playlists' timestamps are carried
++ * on past that by their demuxers; a cue time made from an X-TIMESTAMP-MAP
++ * has started over with the number it was made from. It is put within
++ * half a round of what was last read. */
++static void carry_cue_past_the_wrap(HLSContext *c, AVPacket *pkt)
++{
++    const int64_t round = av_rescale(INT64_C(1) << 33, 1000, 90000);
++    int64_t read, away;
++
++    if (c->cur_timestamp == AV_NOPTS_VALUE || pkt->pts == AV_NOPTS_VALUE)
++        return;
++    read = av_rescale(c->cur_timestamp, 1000, AV_TIME_BASE);
++    away = read - pkt->pts;
++    if (away > round / 2)
++        away = (away + round / 2) / round * round;
++    else if (away < -round / 2)
++        away = -((-away + round / 2) / round * round);
++    else
++        return;
++    pkt->pts += away;
++    if (pkt->dts != AV_NOPTS_VALUE)
++        pkt->dts += away;
+ }
+ 
++/* Whether the segment a playlist of subtitles is at begins after what the
++ * other playlists have been read to. Known for a list that is complete,
++ * where the place of each segment follows from the lengths of those
++ * before it; a list that moves on ends where there is nothing more to
++ * read anyway. */
++static int subtitle_segment_is_ahead(HLSContext *c, struct playlist *v)
++{
++    int64_t n = v->cur_seq_no - v->start_seq_no, start = c->first_timestamp;
++
++    if (!v->finished || n <= 0 || n >= v->n_segments ||
++        c->first_timestamp == AV_NOPTS_VALUE || c->cur_timestamp == AV_NOPTS_VALUE)
++        return 0;
++    for (int64_t i = 0; i < n; i++)
++        start += v->segments[i]->duration;
++    return start > c->cur_timestamp;
++}
++
+ static int read_subtitle_packet(struct playlist *v, AVPacket *pkt)
+ {
+     HLSContext *c = v->parent->priv_data;
+     int ret;
+ 
++    /* A playlist that could not be fetched a moment ago is not asked for
++     * again with every packet of the other playlists. */
++    if (v->wait_until && av_gettime_relative() < v->wait_until)
++        return AVERROR_EOF;
++    v->wait_until = 0;
++
+ restart:
+     ret = reload_playlist(v, c);
+-    if (ret < 0)
++    if (ret < 0) {
++        if (ret != AVERROR_EOF && ret != AVERROR_EXIT)
++            v->wait_until = av_gettime_relative() + 2 * AV_TIME_BASE;
+         return ret;
++    }
+ 
+-    if (v->input && !v->ctx)
++    if (v->input && !v->ctx && !v->input_read_done)
+         ff_format_io_close(v->parent, &v->input);
+ 
+-    if (!v->input && !v->ctx) {
++    if (!v->ctx) {
++        /* The segments are read as the other playlists get to them, not
++         * all those up to the next cue at once: a quarter of an hour in
++         * which nobody speaks would be a hundred and fifty requests on
++         * end, and nothing else is read meanwhile. */
++        if (subtitle_segment_is_ahead(c, v))
++            return AVERROR_EOF;
+         ret = init_subtitle_context(v);
+-        if (ret < 0)
+-            return ret;
++        if (ret < 0) {
++            if (ret == AVERROR_EXIT || ff_check_interrupt(c->interrupt_callback))
++                return AVERROR_EXIT;
++            /* A segment that cannot be had costs its cues and nothing
++             * more: the one after it is read. */
++            av_log(v->parent, AV_LOG_WARNING,
++                   "subtitle segment %"PRId64" of playlist %d could not be read, passed over\n",
++                   v->cur_seq_no, v->index);
++            ff_format_io_close(v->parent, &v->input);
++            v->input_read_done = 0;
++            if (v->ctx) {
++                avformat_free_context(v->ctx);
++                v->ctx = NULL;
++            }
++            v->cur_seq_no++;
++            goto restart;
++        }
+     }
+ 
+-    ret = av_read_frame(v->ctx, v->pkt);
+-    if (!ret) {
+-        return ret;
+-    }
+-    ff_format_io_close(v->parent, &v->input);
++    while (!(ret = av_read_frame(v->ctx, v->pkt))) {
++        carry_cue_past_the_wrap(c, v->pkt);
++        if (!cue_was_read(v, v->pkt))
++            return 0;
++        av_packet_unref(v->pkt);
++    }
++    /* The connection is kept for the next segment where connections are
++     * kept at all, as the other playlists keep theirs: a new one for each
++     * segment is a handshake every few seconds. */
++    if (c->http_persistent && v->input)
++        v->input_read_done = 1;
++    else
++        ff_format_io_close(v->parent, &v->input);
+     v->cur_seq_no++;
+-    c->cur_seq_no = v->cur_seq_no;
++    /* What this segment held is what the next one may hold again. */
++    memcpy(v->cues_before, v->cues_now, sizeof(v->cues_now));
++    v->n_cues_before = v->n_cues_now;
++    v->n_cues_now = 0;
+ 
+     avformat_close_input(&v->ctx);
+ 
+@@ -2401,6 +2536,14 @@
+         for (i = 0; i < c->n_playlists; i++) {
+             struct playlist *pls = c->playlists[i];
+             pls->m3u8_hold_counters = 0;
++            /* A playlist of subtitles is fetched when its subtitles are
++             * wanted, which for most of them is never: each is a request
++             * the opening would wait for. What its stream is, is known
++             * without it. */
++            if (pls->is_subtitle && av_find_input_format("webvtt")) {
++                pls->not_loaded = 1;
++                continue;
++            }
+             if ((ret = parse_playlist(c, pls->url, pls, NULL)) < 0) {
+                 av_log(s, AV_LOG_WARNING, "parse_playlist error %s [%s]\n", av_err2str(ret), pls->url);
+                 pls->broken = 1;
+@@ -2475,7 +2618,7 @@
+         if (!(pls->ctx = avformat_alloc_context()))
+             return AVERROR(ENOMEM);
+ 
+-        if (pls->n_segments == 0)
++        if (pls->n_segments == 0 && !pls->not_loaded)
+             continue;
+ 
+         pls->index  = i;
+@@ -2548,7 +2691,9 @@
+          * use that information to find the media format, otherwise probe input data
+          */
+         seg = current_segment(pls);
+-        if (seg && seg->key_type == KEY_SAMPLE_AES && pls->is_id3_timestamped &&
++        if (pls->not_loaded) {
++            in_fmt = av_find_input_format("webvtt");
++        } else if (seg && seg->key_type == KEY_SAMPLE_AES && pls->is_id3_timestamped &&
+             pls->audio_setup_info.codec_id != AV_CODEC_ID_NONE) {
+             av_assert1(pls->audio_setup_info.codec_id == AV_CODEC_ID_AAC ||
+                        pls->audio_setup_info.codec_id == AV_CODEC_ID_AC3 ||
+@@ -2606,7 +2751,7 @@
+ 
+         av_dict_copy(&options, c->seg_format_opts, 0);
+ 
+-        ret = avformat_open_input(&pls->ctx, pls->segments[0]->url, in_fmt, &options);
++        ret = avformat_open_input(&pls->ctx, pls->n_segments ? pls->segments[0]->url : pls->url, in_fmt, &options);
+         av_dict_free(&options);
+         if (ret < 0)
+             return ret;
+@@ -2670,12 +2815,64 @@
+     return 0;
+ }
+ 
++/* Fetches a playlist of subtitles that was left alone when the others
++ * were read. One that will not come is asked for again in a while, and
++ * costs nothing but its subtitles meanwhile. */
++static int load_subtitle_playlist(HLSContext *c, struct playlist *pls)
++{
++    int ret;
++
++    if (pls->wait_until && av_gettime_relative() < pls->wait_until)
++        return AVERROR(EAGAIN);
++    ret = parse_playlist(c, pls->url, pls, NULL);
++    if (ret >= 0 && pls->n_segments == 0)
++        ret = AVERROR(EAGAIN);
++    if (ret < 0) {
++        if (ret != AVERROR_EXIT)
++            av_log(c->ctx, AV_LOG_WARNING, "subtitle playlist %d could not be read: %s [%s]\n",
++                   pls->index, av_err2str(ret), pls->url);
++        pls->wait_until = av_gettime_relative() + 2 * AV_TIME_BASE;
++        return ret;
++    }
++    pls->wait_until = 0;
++    pls->not_loaded = 0;
++    return 0;
++}
++
++/* Puts a playlist of subtitles that is wanted from now on where the time
++ * being shown is. Left to itself it starts at the time last read, which
++ * is ahead of that by all that waits to be played: the cue that is up at
++ * this moment, and those of the next seconds, would never be seen. */
++static void start_subtitles_at(HLSContext *c, struct playlist *pls, int64_t shown)
++{
++    if (pls->finished) {
++        /* The place of each segment is known from the lengths of those
++         * before it, once the first timestamp is. */
++        if (c->first_timestamp != AV_NOPTS_VALUE)
++            find_timestamp_in_playlist(c, pls, shown, &pls->cur_seq_no, NULL);
++    } else if (c->cur_timestamp != AV_NOPTS_VALUE && c->cur_timestamp > shown &&
++               pls->target_duration > 0) {
++        /* A list that moves on says nothing of when its segments are:
++         * as many of them back as the time takes up at most. */
++        int64_t back = (c->cur_timestamp - shown + pls->target_duration - 1) / pls->target_duration;
++        pls->cur_seq_no = FFMAX(pls->cur_seq_no - back, pls->start_seq_no);
++    }
++    pls->seek_timestamp = shown;
++    pls->seek_flags = AVSEEK_FLAG_ANY;
++    pls->seek_stream_index = -1;
++}
++
+ static int recheck_discard_flags(AVFormatContext *s, int first)
+ {
+     HLSContext *c = s->priv_data;
+     int i, changed = 0;
+     int cur_needed;
++    /* Said for the playlists that are found wanted by this look, and for
++     * no later one. */
++    int64_t shown = c->subtitles_from;
+ 
++    c->subtitles_from = AV_NOPTS_VALUE;
++
+     /* Check if any new streams are needed */
+     for (i = 0; i < c->n_playlists; i++) {
+         struct playlist *pls = c->playlists[i];
+@@ -2686,6 +2883,13 @@
+             continue;
+         }
+         if (cur_needed && !pls->needed) {
++            if (pls->not_loaded && load_subtitle_playlist(c, pls) < 0) {
++                /* Asked for again by a later look, which has to be told
++                 * again where the subtitles start. */
++                if (c->subtitles_from == AV_NOPTS_VALUE)
++                    c->subtitles_from = shown;
++                continue;
++            }
+             pls->needed = 1;
+             changed = 1;
+             pls->cur_seq_no = select_cur_seq_no(c, pls);
+@@ -2697,7 +2901,23 @@
+                 pls->seek_flags = AVSEEK_FLAG_ANY;
+                 pls->seek_stream_index = -1;
+             }
++            if (pls->is_subtitle) {
++                pls->n_cues_before = pls->n_cues_now = 0;
++                if (shown != AV_NOPTS_VALUE)
++                    start_subtitles_at(c, pls, shown);
++            }
+             av_log(s, AV_LOG_INFO, "Now receiving playlist %d, segment %"PRId64"\n", i, pls->cur_seq_no);
++        } else if (cur_needed && pls->is_subtitle && shown != AV_NOPTS_VALUE) {
++            /* Wanted still, or again before it was seen to have been let
++             * go of, and to be read from what is shown: what it had read
++             * ahead to is put back. */
++            ff_format_io_close(pls->parent, &pls->input);
++            pls->input_read_done = 0;
++            avformat_close_input(&pls->ctx);
++            av_packet_unref(pls->pkt);
++            pls->n_cues_before = pls->n_cues_now = 0;
++            pls->cur_seq_no = select_cur_seq_no(c, pls);
++            start_subtitles_at(c, pls, shown);
+         } else if (first && !cur_needed && pls->needed) {
+             ff_format_io_close(pls->parent, &pls->input);
+             pls->input_read_done = 0;
+@@ -2796,9 +3016,12 @@
+                 int64_t ts_diff;
+                 AVRational tb;
+                 struct segment *seg = NULL;
+-                if (pls->is_subtitle)
++                if (pls->is_subtitle) {
+                     ret = read_subtitle_packet(pls, pls->pkt);
+-                else
++                    /* Subtitles that cannot be had are done without. */
++                    if (ret < 0)
++                        ret = AVERROR_EOF;
++                } else
+                     ret = av_read_frame(pls->ctx, pls->pkt);
+                 if (ret < 0) {
+                     if (!avio_feof(&pls->pb.pub) && ret != AVERROR_EOF)
+@@ -2811,8 +3034,11 @@
+                         fill_timing_for_id3_timestamped_stream(pls);
+                     }
+ 
++                    /* A cue is where it is in time and says nothing of
++                     * where its playlist begins: neither the first
++                     * timestamp nor an offset from it is taken from one. */
+                     if (pls->ts_offset == AV_NOPTS_VALUE &&
+-                        pls->pkt->dts    != AV_NOPTS_VALUE) {
++                        pls->pkt->dts    != AV_NOPTS_VALUE && !pls->is_subtitle) {
+                         int64_t seg_idx = pls->cur_seq_no - pls->start_seq_no;
+                         int64_t ts = av_rescale_q(pls->pkt->dts,
+                             get_timebase(pls), AV_TIME_BASE_Q);
+@@ -2851,7 +3077,7 @@
+                  * clock the stream is on there. Whichever playlist gets to
+                  * it first sets the shift for all: they restart together. */
+                 if (c->seek_shift_pending && pls->pkt->dts != AV_NOPTS_VALUE &&
+-                    pls->seek_segment_start != AV_NOPTS_VALUE) {
++                    pls->seek_segment_start != AV_NOPTS_VALUE && !pls->is_subtitle) {
+                     c->seek_shift = pls->seek_segment_start +
+                         (pls->ts_offset != AV_NOPTS_VALUE ? pls->ts_offset : 0) -
+                         av_rescale_q(pls->pkt->dts, get_timebase(pls), AV_TIME_BASE_Q);
+@@ -2872,8 +3098,11 @@
+                     }
+ 
+                     tb = get_timebase(pls);
+-                    ts_diff = av_rescale_rnd(pls->pkt->dts, AV_TIME_BASE,
+-                                            tb.den, AV_ROUND_DOWN) +
++                    /* A cue that began before the time asked for and is
++                     * still up at it is wanted: it is judged by its end. */
++                    ts_diff = av_rescale_rnd(pls->pkt->dts +
++                                             (pls->is_subtitle ? pls->pkt->duration : 0),
++                                             AV_TIME_BASE, tb.den, AV_ROUND_DOWN) +
+                             c->seek_shift - pls->seek_timestamp;
+                     if (ts_diff >= 0 && (pls->seek_flags  & AVSEEK_FLAG_ANY ||
+                                         pls->pkt->flags & AV_PKT_FLAG_KEY)) {
+@@ -2969,7 +3198,9 @@
+                 pkt->pts += shift;
+         }
+ 
+-        if (pkt->dts != AV_NOPTS_VALUE)
++        /* Not from a cue, which is where it is in time and not where
++         * the reading has got to. */
++        if (pkt->dts != AV_NOPTS_VALUE && !pls->is_subtitle)
+             c->cur_timestamp = av_rescale_q(pkt->dts,
+                                             ist->time_base,
+                                             AV_TIME_BASE_Q);
+@@ -3079,8 +3310,10 @@
+             for (j = 0; j < (int)pls->ctx->nb_streams; j++)
+                 ffstream(pls->ctx->streams[j])->pts_wrap_reference = AV_NOPTS_VALUE;
+         }
+-        if (pls->is_subtitle)
++        if (pls->is_subtitle) {
+             avformat_close_input(&pls->ctx);
++            pls->n_cues_before = pls->n_cues_now = 0;
++        }
+ 
+         /* Reset the init segment so it's re-fetched and served appropriately */
+         pls->cur_init_section = NULL;
+@@ -3111,6 +3344,7 @@
+     }
+ 
+     c->cur_timestamp = seek_timestamp;
++    c->subtitles_from = AV_NOPTS_VALUE;
+ 
+     return 0;
+ }
+@@ -3191,6 +3425,8 @@
+         OFFSET(seg_format_opts), AV_OPT_TYPE_DICT, {.str = NULL}, 0, 0, FLAGS},
+     {"seg_max_retry", "Maximum number of times to reload a segment on error.",
+      OFFSET(seg_max_retry), AV_OPT_TYPE_INT, {.i64 = 0}, 0, INT_MAX, FLAGS},
++    {"subtitles_from", "Where a playlist of subtitles that is wanted from the next read on starts, in microseconds: the time being shown, in place of the time last read",
++     OFFSET(subtitles_from), AV_OPT_TYPE_INT64, {.i64 = AV_NOPTS_VALUE}, INT64_MIN, INT64_MAX, FLAGS},
+     {NULL}
+ };
+ 
+--- a/libavformat/webvttdec.c
++++ b/libavformat/webvttdec.c
+@@ -36,6 +36,7 @@
+     const AVClass *class;
+     FFDemuxSubtitlesQueue q;
+     int kind;
++    int timestamp_map;
+ } WebVTTContext;
+ 
+ static int webvtt_probe(const AVProbeData *p)
+@@ -58,11 +59,40 @@
+     return AV_NOPTS_VALUE;
+ }
+ 
++/* What an X-TIMESTAMP-MAP in a header adds to every cue time, in
++ * milliseconds. HLS writes one into each WebVTT segment to say which
++ * timestamp of the other segments a cue time stands for: MPEGTS, on a
++ * 90 kHz clock, is the time LOCAL is. Without one the cue times are
++ * those timestamps themselves (RFC 8216, 3.5), and nothing is added. */
++static int64_t timestamp_map_offset(const char *header)
++{
++    const char *map = strstr(header, "X-TIMESTAMP-MAP=");
++    int64_t mpegts = 0, local = 0;
++
++    if (!map)
++        return 0;
++    map += strlen("X-TIMESTAMP-MAP=");
++    while (*map && *map != '\n' && *map != '\r') {
++        if (!strncmp(map, "MPEGTS:", 7)) {
++            mpegts = strtoll(map + 7, NULL, 10);
++        } else if (!strncmp(map, "LOCAL:", 6)) {
++            local = read_ts(map + 6);
++            if (local == AV_NOPTS_VALUE)
++                local = 0;
++        }
++        map += strcspn(map, ",\r\n");
++        if (*map == ',')
++            map++;
++    }
++    return av_rescale(mpegts, 1000, 90000) - local;
++}
++
+ static int webvtt_read_header(AVFormatContext *s)
+ {
+     WebVTTContext *webvtt = s->priv_data;
+     AVBPrint cue;
+     int res = 0;
++    int64_t offset = 0;
+     AVStream *st = avformat_new_stream(s, NULL);
+ 
+     if (!st)
+@@ -92,6 +122,10 @@
+         p = identifier = cue.str;
+         pos = avio_tell(s->pb);
+ 
++        if (webvtt->timestamp_map &&
++            (!strncmp(p, "\xEF\xBB\xBFWEBVTT", 9) || !strncmp(p, "WEBVTT", 6)))
++            offset = timestamp_map_offset(p);
++
+         /* ignore header chunk */
+         if (!strncmp(p, "\xEF\xBB\xBFWEBVTT", 9) ||
+             !strncmp(p, "WEBVTT", 6) ||
+@@ -148,7 +182,7 @@
+             goto end;
+         }
+         sub->pos = pos;
+-        sub->pts = ts_start;
++        sub->pts = ts_start + offset;
+         sub->duration = ts_end - ts_start;
+ 
+ #define SET_SIDE_DATA(name, type) do {                                  \
+@@ -203,6 +237,7 @@
+         { "captions",     "WebVTT captions kind",     0, AV_OPT_TYPE_CONST, { .i64 = AV_DISPOSITION_CAPTIONS },     INT_MIN, INT_MAX, KIND_FLAGS, .unit = "webvtt_kind" },
+         { "descriptions", "WebVTT descriptions kind", 0, AV_OPT_TYPE_CONST, { .i64 = AV_DISPOSITION_DESCRIPTIONS }, INT_MIN, INT_MAX, KIND_FLAGS, .unit = "webvtt_kind" },
+         { "metadata",     "WebVTT metadata kind",     0, AV_OPT_TYPE_CONST, { .i64 = AV_DISPOSITION_METADATA },     INT_MIN, INT_MAX, KIND_FLAGS, .unit = "webvtt_kind" },
++    { "timestamp_map", "Place the cues by the X-TIMESTAMP-MAP of a segment of HLS", OFFSET(timestamp_map), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, KIND_FLAGS },
+     { NULL }
+ };
+ 
