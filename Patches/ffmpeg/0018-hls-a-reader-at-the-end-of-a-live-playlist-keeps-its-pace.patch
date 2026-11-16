@@ -1,0 +1,104 @@
+hls: a reader at the end of a live playlist keeps the playlist's pace
+
+A reader that has read every segment a live playlist lists waits, and
+reads the playlist again when a segment's length has passed since it
+last read it: by then the playlist has moved on by one segment. Two
+things made that reading late, each time anew.
+
+The time was counted from when the last reading was done, with its
+answer taken in: later than the moment the playlist was asked for by
+what the answer took to come. And the reader looked whether the time
+had come once every tenth of a second, so that it read the playlist up
+to a tenth of a second after its time.
+
+Each reading then counted from itself. Against a source that makes a
+segment every 1.92 seconds, a reader on the same machine asked for the
+playlist 3 to 108 ms later each time than a segment's length after the
+time before, 30 to 60 ms on average; one whose playlist takes 0.3 s to
+come, 0.32 to 0.42 s later each time. The reader fell behind the
+playlist by that much with every segment, until it was a whole segment
+behind, found two new ones in the list, and began falling behind again.
+
+Whoever plays what the reader hands over got each segment that much
+later than the one before. A player with seconds in hand saw its store
+thin out and fill up again. One that had just stalled at the end of the
+playlist plays on with the one segment that then came, and has the next
+coming just as that one ends: it ran dry a second time some ten seconds
+later, when the lateness had added up to more than it had to spare.
+
+The reader now sleeps until the time has come and not past it, in
+pieces of a tenth of a second at most, so that an interrupt is heard as
+soon as it was. And when the reading it waited for finds that the
+playlist has moved on, the next interval is counted from the time that
+reading was due at, not from when it was done. The playlist is asked
+for a segment's length after it was asked for, which is where RFC 8216
+counts from (6.3.4), and neither the time an answer takes nor the
+lateness of one waking is carried into the next.
+
+Nothing else is changed. A reading that was not waited for (its time
+had passed when the reader came to the end of a segment), one made a
+whole interval late (a process that was held up), and one that finds
+nothing new, which is made again half a target duration later, count
+from when they were done, as before. The playlist is asked for no more
+often than it was: once for each segment.
+
+--- a/libavformat/hls.c
++++ b/libavformat/hls.c
+@@ -1780,6 +1780,8 @@
+ 
+     if (!v->input || (c->http_persistent && v->input_read_done)) {
+         int64_t reload_interval;
++        /* When the list was to be read again, once that was waited for. */
++        int64_t due = AV_NOPTS_VALUE;
+ 
+         /* Check that the playlist is still needed before opening a new
+          * segment. */
+@@ -1802,6 +1804,11 @@
+         if (!v->finished &&
+             av_gettime_relative() - v->last_load_time >= reload_interval) {
+             int64_t listed_seq_no = v->listed_seq_no;
++            /* Whether this reading is one that was waited for and is made
++             * as its time comes: not a whole interval after it, as by a
++             * reader that was held up meanwhile. */
++            int in_time = due != AV_NOPTS_VALUE &&
++                          av_gettime_relative() - due < reload_interval;
+             if ((ret = parse_playlist(c, v->url, v, NULL)) < 0) {
+                 if (ret != AVERROR_EXIT)
+                     av_log(v->parent, AV_LOG_WARNING, "Failed to reload playlist %d\n",
+@@ -1812,6 +1819,16 @@
+                 v->start_seq_no + v->n_segments < listed_seq_no &&
+                 v->cur_seq_no >= v->start_seq_no + v->n_segments)
+                 join_restarted_playlist(c, v);
++            /* A list that was waited for, and has moved on, is read again
++             * an interval after the time this reading was due at: the
++             * time at which the list was found to have its next segment,
++             * and at which it will have the one after. Counted from when
++             * this reading was done, which is later by what the reading
++             * took and by how late the reader woke for it, each reading
++             * would come that much later than the list moves on, and each
++             * segment that much later than the one before it. */
++            if (in_time && v->cur_seq_no < v->start_seq_no + v->n_segments)
++                v->last_load_time = due;
+             /* If we need to reload the playlist again below (if
+              * there's still no more segments), switch to a reload
+              * interval of half the target duration. */
+@@ -1850,12 +1867,17 @@
+             av_log(v->parent, AV_LOG_WARNING, "The m3u8 list sequence may have been wrapped.\n");
+         }
+         if (v->cur_seq_no >= v->start_seq_no + v->n_segments) {
++            int64_t left;
+             if (v->finished || v->is_subtitle)
+                 return AVERROR_EOF;
+-            while (av_gettime_relative() - v->last_load_time < reload_interval) {
++            /* Slept until the time comes, and not past it: a tenth of a
++             * second at a time at most, to hear of an interrupt between
++             * them as before. */
++            due = v->last_load_time + reload_interval;
++            while ((left = due - av_gettime_relative()) > 0) {
+                 if (ff_check_interrupt(c->interrupt_callback))
+                     return AVERROR_EXIT;
+-                av_usleep(100*1000);
++                av_usleep(FFMIN(left, 100*1000));
+             }
+             /* Enough time has elapsed since the last reload */
+             goto reload;
