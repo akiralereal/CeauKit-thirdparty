@@ -385,6 +385,10 @@ compile() {
     [[ "$PICTURE" == yes ]] && picture_decoders+=(--enable-libdav1d)
     # DASH's reader needs libxml2; IMF's would come with it, and is not wanted.
     [[ "$DASH" == yes ]] && manifest_readers+=(--enable-libxml2 --disable-demuxer=imf)
+    # Audible's .aa reader decrypts with a key FFmpeg carries in its source, so
+    # whoever has such a file needs no key of their own. No app of these plays
+    # audiobooks; the owner had it left out (2026-11-16, docs/Shipping.md).
+    local unwanted_readers=(--disable-demuxer=aa)
 
     local options=(
         --prefix="$build_dir/install"
@@ -401,6 +405,7 @@ compile() {
         --enable-zlib --enable-bzlib --enable-iconv
         ${picture_decoders[@]+"${picture_decoders[@]}"}
         ${manifest_readers[@]+"${manifest_readers[@]}"}
+        "${unwanted_readers[@]}"
         --disable-filters
         --enable-filter=bwdif,yadif,scale,format,null,anull,aresample,aformat,volume,acompressor,dynaudnorm,loudnorm
         ${extra[@]+"${extra[@]}"}
@@ -457,6 +462,8 @@ compile() {
     fi
     grep -q '^#define CONFIG_IMF_DEMUXER 0' config_components.h \
         || die "$triple was configured with the IMF reader"
+    grep -q '^#define CONFIG_AA_DEMUXER 0' config_components.h \
+        || die "$triple was configured with Audible's .aa reader"
     # The hand-written code is what makes software decoding quick enough to
     # watch. A build that was meant to have it and has not is not a build.
     if [[ "$arch" == arm64 ]]; then
