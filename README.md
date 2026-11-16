@@ -169,9 +169,16 @@ changes.
 
 ## Releases and tags
 
-No version of Ceau that contains these libraries has been released, and this
-repository has no tags. The `main` branch holds what the current development
-builds of CeauKit are made from.
+Each version of Ceau that ships with these libraries gets a tag here, named
+`ceau-` and the version number the App Store and the app itself show: the
+source of the libraries in Ceau 3.0.0 is the tag `ceau-3.0.0`. The tag is on
+the commit whose patches, build scripts and build information are those of
+the libraries in that version. It is made when that version is released, is
+never moved, and stays as long as that version is distributed.
+
+No version of Ceau that contains these libraries has been released yet, and
+this repository has no tags; Ceau 3.0.0 will be the first. The `main` branch
+holds what the current development builds of CeauKit are made from.
 
 ## Questions
 
