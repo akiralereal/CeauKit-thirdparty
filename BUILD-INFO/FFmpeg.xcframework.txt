@@ -10,5 +10,6 @@ Built with: its parser, its tree and its threads; no HTTP, iconv, ICU, zlib, cat
 License: MIT (see LICENSE-libxml2.txt inside each framework that has it; dict.c and list.c carry notices of their own, which it includes)
 watchOS: sound alone. No dav1d, no libxml2 and no DASH, no VideoToolbox, no AudioToolbox; arm64_32 without assembly
 Assembler for x86_64: NASM version 3.02 compiled on Jun 29 2026
-Built 2026-11-16T06:22:54Z with Xcode 27.2 Build version 27B52 
+Debug symbols: a dSYM for each slice, in the slice's dSYMs folder; the binaries are stripped
+Built 2026-11-16T09:01:25Z with Xcode 27.2 Build version 27B52 
 Configure options: see Scripts/build-ffmpeg.sh at the commit that produced this

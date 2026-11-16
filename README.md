@@ -141,7 +141,8 @@ Everything the scripts write is under `Vendor/`, which git ignores:
 
 - `Vendor/FFmpeg.xcframework` and `Vendor/Libass.xcframework`: one dynamic
   framework per platform. Each framework carries the licence texts of what is
-  in it and a privacy manifest, and each xcframework a `BUILD-INFO.txt`.
+  in it and a privacy manifest, each slice its dSYM (the debug symbols the
+  framework's binary is stripped of), and each xcframework a `BUILD-INFO.txt`.
 - `Vendor/CFFmpeg/` and `Vendor/CAss/`: the libraries' headers, laid out for
   CeauKit's Swift package. Each contains a link to a header of CeauKit that is
   not in this repository, so here the link points at nothing. The frameworks

@@ -19,6 +19,13 @@
 # Each framework carries the four licences and a privacy manifest
 # (Scripts/privacy-manifest.sh), written from what the finished binary calls.
 #
+# Each slice also has a dSYM, made from the linked binary before the strip
+# takes its local names away, and packed into the xcframework beside it.
+# Xcode copies it into the archive of an app that embeds the framework, so a
+# crash inside any of the four can be read; none of it ships in the app. The
+# compiler writes this repository's folder as `.` in what it records, so a
+# dSYM names no folder of the Mac it was built on.
+#
 #   Scripts/build-libass.sh                    every platform
 #   Scripts/build-libass.sh macos ios          only these (the others are kept
 #                                              from earlier runs, if built)
@@ -42,6 +49,9 @@ SOURCES="$ROOT/Vendor/build/src"
 WORK="$ROOT/Vendor/build/libass"
 # Every core, unless told to leave some for whatever else the Mac is doing.
 JOBS="${CEAUKIT_JOBS:-$(sysctl -n hw.ncpu)}"
+# Debug information for the dSYM (-g changes no code), and where the compiler
+# records that the sources were: in this repository, wherever it is.
+DEBUG_FLAGS="-g -fdebug-prefix-map=$ROOT=."
 # A change to this script, or to the patches, is a change to what it builds.
 SCRIPT_ID="$({ cat "$ROOT/Scripts/build-libass.sh" "$ROOT"/Patches/{libass,freetype,harfbuzz,fribidi}/*.patch 2>/dev/null || true; } | shasum -a 256 | cut -c1-16)"
 
@@ -139,7 +149,7 @@ compile_freetype() {
         --with-old-mac-fonts=no --with-fsspec=no --with-fsref=no \
         --with-quickdraw-toolbox=no --with-quickdraw-carbon=no --with-ats=no \
         CC="$cc" CC_BUILD="$(xcrun -sdk macosx -f clang) -isysroot $(xcrun -sdk macosx --show-sdk-path)" \
-        CFLAGS="-O2 -fPIC" PKG_CONFIG=false ZLIB_CFLAGS=" " ZLIB_LIBS="-lz" > configure.log 2>&1 \
+        CFLAGS="-O2 -fPIC $DEBUG_FLAGS" PKG_CONFIG=false ZLIB_CFLAGS=" " ZLIB_LIBS="-lz" > configure.log 2>&1 \
         || { tail -30 configure.log; die "FreeType: configure failed for $host"; }
     grep -q '^FTSYS_SRC = \$(PLATFORM_DIR)/ftsystem.c' unix-def.mk \
         || die "FreeType: configured to read font files through stdio for $host, not to map them"
@@ -154,7 +164,7 @@ compile_harfbuzz() {
     local build_dir="$1" cxx="$2" prefix="$1/install"
     mkdir -p "$build_dir/harfbuzz" "$prefix/include/harfbuzz" "$prefix/lib"
     # shellcheck disable=SC2086
-    $cxx -O2 -fPIC -std=c++17 -fno-exceptions -fno-rtti -fno-threadsafe-statics -fvisibility-inlines-hidden \
+    $cxx -O2 -fPIC $DEBUG_FLAGS -std=c++17 -fno-exceptions -fno-rtti -fno-threadsafe-statics -fvisibility-inlines-hidden \
         -DHAVE_PTHREAD=1 -DHB_NO_PRAGMA_GCC_DIAGNOSTIC_ERROR \
         -c "$SOURCES/harfbuzz-$HARFBUZZ/src/harfbuzz.cc" -o "$build_dir/harfbuzz/harfbuzz.o" > "$build_dir/harfbuzz/compile.log" 2>&1 \
         || { tail -30 "$build_dir/harfbuzz/compile.log"; die "HarfBuzz: compile failed"; }
@@ -180,7 +190,7 @@ compile_fribidi() {
     for file in "$source"/lib/*.c; do
         local object="$build_dir/fribidi/$(basename "${file%.c}").o"
         # shellcheck disable=SC2086
-        $cc -O2 -fPIC -I"$prefix/include/fribidi" -I"$source/lib" \
+        $cc -O2 -fPIC $DEBUG_FLAGS -I"$prefix/include/fribidi" -I"$source/lib" \
             -DHAVE_STDLIB_H=1 -DHAVE_STRING_H=1 -DHAVE_STRINGS_H=1 -DHAVE_STRINGIZE=1 -DSTDC_HEADERS=1 \
             -c "$file" -o "$object" >> "$build_dir/fribidi/compile.log" 2>&1 \
             || { tail -30 "$build_dir/fribidi/compile.log"; die "FriBidi: compile failed"; }
@@ -204,7 +214,7 @@ compile_libass() {
         --enable-static --disable-shared \
         --disable-fontconfig --disable-directwrite --disable-libunibreak --enable-coretext \
         ${extra[@]+"${extra[@]}"} \
-        CC="$cc" CFLAGS="-O2 -fPIC" PKG_CONFIG=false \
+        CC="$cc" CFLAGS="-O2 -fPIC $DEBUG_FLAGS" PKG_CONFIG=false \
         FREETYPE_CFLAGS="-I$prefix/include/freetype2" FREETYPE_LIBS="-L$prefix/lib -lfreetype -lz" \
         FRIBIDI_CFLAGS="-I$prefix/include/fribidi" FRIBIDI_LIBS="-L$prefix/lib -lfribidi" \
         HARFBUZZ_CFLAGS="-I$prefix/include/harfbuzz" HARFBUZZ_LIBS="-L$prefix/lib -lharfbuzz" > configure.log 2>&1 \
@@ -342,7 +352,11 @@ build_platform() {
     write_info_plist "$resources/Info.plist"
     copy_licences "$resources"
     lipo -create "${dylibs[@]}" -output "$content/Libass"
-    strip -x "$content/Libass" 2>/dev/null
+    # The dSYM is read from the objects the linked binary names, so it is
+    # made before the strip takes those names away (-S) with the local ones (-x).
+    make_dsym "$content/Libass" "$WORK/$platform/Libass.framework.dSYM" "$platform"
+    strip -S -x "$content/Libass" 2>/dev/null
+    verify_dsym "$content/Libass" "$WORK/$platform/Libass.framework.dSYM" "$platform"
     verify_binary "$content/Libass" "$platform"
     # Nothing in here calls an API Apple wants a reason for, FreeType having
     # been patched to size a font file without fstat. No reason is given, so
@@ -350,6 +364,25 @@ build_platform() {
     printf '%s: ' "$platform"
     write_privacy_manifest "$content/Libass" "$resources/PrivacyInfo.xcprivacy" libass
     codesign --force --sign - "$framework"
+}
+
+make_dsym() {
+    local binary="$1" dsym="$2" platform="$3"
+    rm -rf "$dsym"
+    dsymutil "$binary" -o "$dsym" > "$dsym.log" 2>&1 \
+        || { tail -20 "$dsym.log"; die "$platform: dsymutil failed"; }
+}
+
+# A dSYM is of use only for the binary whose UUIDs it carries, one for each
+# architecture, and only if the compiler's debug information is in it.
+verify_dsym() {
+    local binary="$1" dsym="$2" platform="$3"
+    [[ "$(dwarfdump --uuid "$binary" | awk '{ print $2, $3 }' | sort)" \
+        == "$(dwarfdump --uuid "$dsym" | awk '{ print $2, $3 }' | sort)" ]] \
+        || die "$platform: the dSYM is not that of the binary that ships"
+    dwarfdump --show-section-sizes "$dsym" | grep '__debug_line' > /dev/null \
+        || die "$platform: the dSYM holds no debug information"
+    echo "$platform: dSYM for $(dwarfdump --uuid "$dsym" | awk '{ print $3 }' | tr -d '()' | tr '\n' ' ')($(du -sm "$dsym" | cut -f1) MB)"
 }
 
 # A symbol the SDK declares for a newer OS than the deployment target is
@@ -367,7 +400,9 @@ verify_binary() {
         echo "$weak" | sort -u | head -20
         die "$platform: libass calls APIs newer than its deployment target (listed above)"
     fi
-    if strings -a "$binary" | grep -q -F -e "$ROOT" -e "$HOME"; then
+    # (Not `grep -q`: on a match it stops reading, strings is told so, the
+    # pipe fails, and the test passes a binary it should have stopped.)
+    if strings -a "$binary" | grep -F -e "$ROOT" -e "$HOME" > /dev/null; then
         die "$platform: the binary names folders of the Mac it was built on"
     fi
     local hvf="without Apple's HVF library"
@@ -446,7 +481,10 @@ assemble_xcframework() {
     local platform arguments=()
     for platform in "${ALL_PLATFORMS[@]}"; do
         if [[ -d "$WORK/$platform/Libass.framework" ]]; then
-            arguments+=(-framework "$WORK/$platform/Libass.framework")
+            [[ -d "$WORK/$platform/Libass.framework.dSYM" ]] \
+                || die "$platform was built without a dSYM; build it again (Scripts/build-libass.sh $platform)"
+            arguments+=(-framework "$WORK/$platform/Libass.framework"
+                -debug-symbols "$WORK/$platform/Libass.framework.dSYM")
         fi
     done
     [[ ${#arguments[@]} -gt 0 ]] || die "nothing was built"
@@ -460,6 +498,7 @@ assemble_xcframework() {
         echo "Patches: $(cd "$ROOT/Patches" && ls {libass,freetype,harfbuzz,fribidi}/*.patch 2>/dev/null | tr '\n' ' ')"
         echo "Licences: ISC, FTL, MIT, LGPL version 2.1 or later (see the LICENSE files inside each framework)"
         echo "Assembler for x86_64: $(nasm --version 2>/dev/null || echo "none, so no x86 assembly")"
+        echo "Debug symbols: a dSYM for each slice, in the slice's dSYMs folder; the binaries are stripped"
         echo "Built $(date -u +%Y-%m-%dT%H:%M:%SZ) with $(xcodebuild -version | tr '\n' ' ')"
         echo "Options: see Scripts/build-libass.sh at the commit that produced this"
     } > "$ROOT/Vendor/Libass.xcframework/BUILD-INFO.txt"

@@ -35,6 +35,13 @@
 # Each framework carries the licences of what is in it and a privacy manifest
 # (Scripts/privacy-manifest.sh), written from what the finished binary calls.
 #
+# Each slice also has a dSYM, made from the linked binary before the strip
+# takes its local names away, and packed into the xcframework beside it.
+# Xcode copies it into the archive of an app that embeds the framework, so a
+# crash inside FFmpeg, dav1d or libxml2 can be read; none of it ships in the
+# app. The compiler writes this repository's folder as `.` in what it
+# records, so a dSYM names no folder of the Mac it was built on.
+#
 # A watch plays sound and shows no picture, and its slices are built for
 # that. dav1d is not in them, having no picture to decode, and libxml2 is not
 # either: DASH on a watch would cost its two architectures some 0.6 MB each,
@@ -78,6 +85,9 @@ SOURCE="$WORK/src/ffmpeg-$VERSION"
 DAV1D_SOURCE="$WORK/src/dav1d-$DAV1D"
 LIBXML2_SOURCE="$WORK/src/libxml2-$LIBXML2"
 TOOLS="$WORK/tools"
+# Where the compiler records that the sources were, in the debug information
+# a dSYM is made of: in this repository, wherever the repository is.
+DEBUG_PREFIX_MAP="-fdebug-prefix-map=$ROOT=."
 # Every core, unless told to leave some for whatever else the Mac is doing.
 JOBS="${CEAUKIT_JOBS:-$(sysctl -n hw.ncpu)}"
 
@@ -235,7 +245,7 @@ write_cross_file() {
     [[ "$arch" == x86_64 ]] && family=x86_64
     cat > "$path" <<EOF
 [binaries]
-c = ['$cc', '-target', '$triple', '-isysroot', '$sdk_path']
+c = ['$cc', '-target', '$triple', '-isysroot', '$sdk_path', '-g', '$DEBUG_PREFIX_MAP']
 ar = '$(xcrun -f ar)'
 strip = '$(xcrun -f strip)'
 $assembler
@@ -390,15 +400,17 @@ compile() {
     # audiobooks; the owner had it left out (2026-11-16, docs/Shipping.md).
     local unwanted_readers=(--disable-demuxer=aa)
 
+    # --enable-debug is FFmpeg's -g, which changes no code: it is what the
+    # dSYM is made of, and the binary that ships is stripped of it.
     local options=(
         --prefix="$build_dir/install"
         --enable-cross-compile --target-os=darwin --arch="$ffmpeg_arch"
         --cc="$cc" --host-cc="$(xcrun -sdk macosx -f clang)"
-        --extra-cflags="$flags" --extra-ldflags="$flags"
+        --extra-cflags="$flags $DEBUG_PREFIX_MAP" --extra-ldflags="$flags"
         --host-cflags="$host_flags" --host-ldflags="$host_flags"
         --pkg-config="$build_dir/pkg-config"
         --enable-pic --enable-static --disable-shared
-        --disable-programs --disable-doc --disable-debug
+        --disable-programs --disable-doc --enable-debug
         --disable-avdevice --disable-encoders --disable-muxers
         --disable-autodetect --enable-pthreads
         ${system_decoders[@]+"${system_decoders[@]}"} --enable-securetransport
@@ -439,8 +451,9 @@ compile() {
     # FFmpeg keeps the command it was configured with, to show when asked
     # (`avformat_configuration`), and that command names folders of the Mac
     # it was built on. What ships says where in this repository things were,
-    # not whose home the repository was in.
-    sed -i '' "s|$ROOT/||g" config.h
+    # not whose home the repository was in; the repository itself, which the
+    # debug prefix map names, reads as `.`.
+    sed -i '' -e "s|$ROOT/||g" -e "s|$ROOT|.|g" config.h
 
     grep -q '^#define CONFIG_GPL 0' config.h && grep -q '^#define CONFIG_NONFREE 0' config.h \
         || die "$triple was configured with GPL or nonfree parts"
@@ -617,7 +630,11 @@ build_platform() {
     [[ "$PICTURE" == yes ]] && cp "$DAV1D_SOURCE/COPYING" "$resources/LICENSE-dav1d.txt"
     [[ "$DASH" == yes ]] && cp "$LIBXML2_SOURCE/LICENSE-libxml2.txt" "$resources/LICENSE-libxml2.txt"
     lipo -create "${dylibs[@]}" -output "$content/FFmpeg"
-    strip -x "$content/FFmpeg" 2>/dev/null
+    # The dSYM is read from the objects the linked binary names, so it is
+    # made before the strip takes those names away (-S) with the local ones (-x).
+    make_dsym "$content/FFmpeg" "$WORK/$platform/FFmpeg.framework.dSYM" "$platform"
+    strip -S -x "$content/FFmpeg" 2>/dev/null
+    verify_dsym "$content/FFmpeg" "$WORK/$platform/FFmpeg.framework.dSYM" "$platform"
     verify_binary "$content/FFmpeg" "$platform"
     # FFmpeg asks for a file's size and kind with stat, fstat and lstat: of
     # the media and subtitle files it is handed, which are in the app's own
@@ -627,6 +644,25 @@ build_platform() {
     write_privacy_manifest "$content/FFmpeg" "$resources/PrivacyInfo.xcprivacy" FFmpeg \
         FileTimestamp=C617.1,3B52.1
     codesign --force --sign - "$framework"
+}
+
+make_dsym() {
+    local binary="$1" dsym="$2" platform="$3"
+    rm -rf "$dsym"
+    dsymutil "$binary" -o "$dsym" > "$dsym.log" 2>&1 \
+        || { tail -20 "$dsym.log"; die "$platform: dsymutil failed"; }
+}
+
+# A dSYM is of use only for the binary whose UUIDs it carries, one for each
+# architecture, and only if the compiler's debug information is in it.
+verify_dsym() {
+    local binary="$1" dsym="$2" platform="$3"
+    [[ "$(dwarfdump --uuid "$binary" | awk '{ print $2, $3 }' | sort)" \
+        == "$(dwarfdump --uuid "$dsym" | awk '{ print $2, $3 }' | sort)" ]] \
+        || die "$platform: the dSYM is not that of the binary that ships"
+    dwarfdump --show-section-sizes "$dsym" | grep '__debug_line' > /dev/null \
+        || die "$platform: the dSYM holds no debug information"
+    echo "$platform: dSYM for $(dwarfdump --uuid "$dsym" | awk '{ print $3 }' | tr -d '()' | tr '\n' ' ')($(du -sm "$dsym" | cut -f1) MB)"
 }
 
 # A symbol the SDK declares for a newer OS than the deployment target is
@@ -639,7 +675,9 @@ verify_binary() {
         echo "$weak" | sort -u | head -20
         die "$platform: FFmpeg calls APIs newer than its deployment target (listed above)"
     fi
-    if strings -a "$binary" | grep -q -F -e "$ROOT" -e "$HOME"; then
+    # (Not `grep -q`: on a match it stops reading, strings is told so, the
+    # pipe fails, and the test passes a binary it should have stopped.)
+    if strings -a "$binary" | grep -F -e "$ROOT" -e "$HOME" > /dev/null; then
         die "$platform: the binary names folders of the Mac it was built on"
     fi
     # The libxml2 inside is this build's. The system's, which the SDK offers
@@ -685,7 +723,10 @@ assemble_xcframework() {
     local platform arguments=()
     for platform in "${ALL_PLATFORMS[@]}"; do
         if [[ -d "$WORK/$platform/FFmpeg.framework" ]]; then
-            arguments+=(-framework "$WORK/$platform/FFmpeg.framework")
+            [[ -d "$WORK/$platform/FFmpeg.framework.dSYM" ]] \
+                || die "$platform was built without a dSYM; build it again (Scripts/build-ffmpeg.sh $platform)"
+            arguments+=(-framework "$WORK/$platform/FFmpeg.framework"
+                -debug-symbols "$WORK/$platform/FFmpeg.framework.dSYM")
         fi
     done
     [[ ${#arguments[@]} -gt 0 ]] || die "nothing was built"
@@ -704,6 +745,7 @@ assemble_xcframework() {
         echo "License: MIT (see LICENSE-libxml2.txt inside each framework that has it; dict.c and list.c carry notices of their own, which it includes)"
         echo "watchOS: sound alone. No dav1d, no libxml2 and no DASH, no VideoToolbox, no AudioToolbox; arm64_32 without assembly"
         echo "Assembler for x86_64: $(nasm --version 2>/dev/null || echo "none, so no x86 assembly")"
+        echo "Debug symbols: a dSYM for each slice, in the slice's dSYMs folder; the binaries are stripped"
         echo "Built $(date -u +%Y-%m-%dT%H:%M:%SZ) with $(xcodebuild -version | tr '\n' ' ')"
         echo "Configure options: see Scripts/build-ffmpeg.sh at the commit that produced this"
     } > "$ROOT/Vendor/FFmpeg.xcframework/BUILD-INFO.txt"

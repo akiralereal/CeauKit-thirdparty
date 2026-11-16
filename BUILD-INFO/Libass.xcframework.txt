@@ -5,5 +5,6 @@ FriBidi 1.0.18, source SHA-256 1de5e8073d035388b71d0b2d452b1da1f8caeea8a7702997b
 Patches: freetype/0001-unix-size-a-font-file-without-fstat.patch freetype/0002-hvf-the-version-is-asked-on-every-system-that-has-the-library.patch libass/0001-font-find-a-named-instance-by-its-postscript-name.patch 
 Licences: ISC, FTL, MIT, LGPL version 2.1 or later (see the LICENSE files inside each framework)
 Assembler for x86_64: NASM version 3.02 compiled on Jun 29 2026
-Built 2026-11-15T06:51:43Z with Xcode 27.2 Build version 27B52 
+Debug symbols: a dSYM for each slice, in the slice's dSYMs folder; the binaries are stripped
+Built 2026-11-16T09:05:02Z with Xcode 27.2 Build version 27B52 
 Options: see Scripts/build-libass.sh at the commit that produced this
