@@ -1,0 +1,538 @@
+mediacodec: a running decoder can be handed another surface
+
+A MediaCodec decoder drew into the surface it was configured with and into
+no other: FFmpeg had no call for MediaCodec's setOutputSurface. So whoever
+shows the pictures could do nothing with a decoder whose surface was going
+away (an Android app's window, each time the app leaves the screen) but
+close it, and nothing with one whose pictures had to be drawn instead of
+shown as they are but close it and open another. For a player that is the
+media opened again: a new connection for a live channel, and a moment with
+no picture and no sound.
+
+With this the device a decoder was opened with hands it another surface
+while it runs: av_mediacodec_device_set_output_surface(device, surface,
+native_window), which is MediaCodec.setOutputSurface (Android API 23)
+through Java and AMediaCodec_setOutputSurface through the NDK. It goes
+through the device and not through the AVCodecContext because whoever shows
+the pictures has the device, which it made, and not the context, which
+belongs to whoever decodes; and because it is called on another thread than
+the one that decodes. The device has a lock for that: a decoder says when it
+has started and when its closing begins (avpriv_mediacodec_device_bind and
+_unbind), and between the two the device can move it. A decoder that is
+being opened reads the device's surface and takes its own references to it
+under the same lock, so the caller may let go of the surface a device had as
+soon as the call has returned. Buffers the decoder gave before the call and
+that are rendered after it go to the new surface.
+
+The call says what it found: 0, a running decoder was moved; 1, no decoder
+has been opened with the device yet, and the next one is configured with the
+new surface (a decoder that was reading the old one at that moment is moved
+as it is bound); 2, the decoder has been closed; less than 0, the decoder
+would not take the surface and draws into the one it had.
+
+The cost: a lock in every MediaCodec device, taken once when a decoder
+starts and once when it closes, and a reference to the device held by the
+decoder while it is open. Nothing changes for a caller that never moves a
+decoder. On a device whose MediaCodec has no setOutputSurface, or refuses
+the surface, the call fails and the caller is where it was before.
+
+--- a/libavcodec/mediacodec_wrapper.c
++++ b/libavcodec/mediacodec_wrapper.c
+@@ -193,6 +193,7 @@
+     jmethodID release_output_buffer_at_time_id;
+ 
+     jmethodID set_input_surface_id;
++    jmethodID set_output_surface_id;
+     jmethodID signal_end_of_input_stream_id;
+ 
+     jclass mediainfo_class;
+@@ -246,6 +247,7 @@
+         { "android/media/MediaCodec", "releaseOutputBuffer", "(IJ)V", FF_JNI_METHOD, OFFSET(release_output_buffer_at_time_id), 0 },
+ 
+         { "android/media/MediaCodec", "setInputSurface", "(Landroid/view/Surface;)V", FF_JNI_METHOD, OFFSET(set_input_surface_id), 0 },
++        { "android/media/MediaCodec", "setOutputSurface", "(Landroid/view/Surface;)V", FF_JNI_METHOD, OFFSET(set_output_surface_id), 0 },
+         { "android/media/MediaCodec", "signalEndOfInputStream", "()V", FF_JNI_METHOD, OFFSET(signal_end_of_input_stream_id), 0 },
+ 
+     { "android/media/MediaCodec$BufferInfo", NULL, NULL, FF_JNI_CLASS, OFFSET(mediainfo_class), 1 },
+@@ -1410,7 +1412,32 @@
+ fail:
+     return ret;
+ }
++
++static int mediacodec_jni_setOutputSurface(FFAMediaCodec *ctx, FFANativeWindow *window)
++{
++    JNIEnv *env = NULL;
++    FFAMediaCodecJni *codec = (FFAMediaCodecJni *)ctx;
++
++    JNI_GET_ENV_OR_RETURN(env, codec, AVERROR_EXTERNAL);
+ 
++    if (!codec->jfields.set_output_surface_id) {
++        av_log(ctx, AV_LOG_ERROR, "System doesn't support setOutputSurface\n");
++        return AVERROR(ENOSYS);
++    }
++    /* Through Java a decoder draws into a Surface, and a window that is
++     * known by its ANativeWindow alone is not one. */
++    if (!window || !window->surface) {
++        av_log(ctx, AV_LOG_ERROR, "setOutputSurface needs an android/view/Surface\n");
++        return AVERROR(EINVAL);
++    }
++
++    (*env)->CallVoidMethod(env, codec->object, codec->jfields.set_output_surface_id, window->surface);
++    if (ff_jni_exception_check(env, 1, codec) < 0)
++        return AVERROR_EXTERNAL;
++
++    return 0;
++}
++
+ static int mediacodec_jni_start(FFAMediaCodec* ctx)
+ {
+     int ret = 0;
+@@ -1830,6 +1857,7 @@
+     .cleanOutputBuffers = mediacodec_jni_cleanOutputBuffers,
+     .signalEndOfInputStream = mediacodec_jni_signalEndOfInputStream,
+     .setAsyncNotifyCallback = mediacodec_jni_setAsyncNotifyCallback,
++    .setOutputSurface = mediacodec_jni_setOutputSurface,
+ };
+ 
+ typedef struct FFAMediaFormatNdk {
+@@ -2214,8 +2242,45 @@
+             av_log(codec, AV_LOG_ERROR, "Decoder configure failed, %d\n", status);
+             return AVERROR_EXTERNAL;
+         }
++    }
++
++    return 0;
++}
++
++static int mediacodec_ndk_setOutputSurface(FFAMediaCodec *ctx, FFANativeWindow *window)
++{
++    FFAMediaCodecNdk *codec = (FFAMediaCodecNdk *)ctx;
++    media_status_t status;
++    ANativeWindow *native_window = NULL;
++    ANativeWindow *from_surface = NULL;
++
++    if (!window)
++        return AVERROR(EINVAL);
++
++    if (window->surface) {
++        JNIEnv *env = NULL;
++        JNI_GET_ENV_OR_RETURN(env, ctx, AVERROR_EXTERNAL);
++        native_window = from_surface = ANativeWindow_fromSurface(env, window->surface);
++    } else {
++        native_window = window->native_window;
++    }
++    if (!native_window)
++        return AVERROR(EINVAL);
++
++    status = AMediaCodec_setOutputSurface(codec->impl, native_window);
++    if (status != AMEDIA_OK) {
++        av_log(codec, AV_LOG_ERROR, "setOutputSurface failed, %d\n", status);
++        if (from_surface)
++            ANativeWindow_release(from_surface);
++        return AVERROR_EXTERNAL;
+     }
+ 
++    /* The window made of the surface at configure() was kept for delete()
++     * to release: the one made here takes its place. */
++    if (codec->window)
++        ANativeWindow_release(codec->window);
++    codec->window = from_surface;
++
+     return 0;
+ }
+ 
+@@ -2526,6 +2591,7 @@
+     .cleanOutputBuffers = mediacodec_ndk_cleanOutputBuffers,
+     .signalEndOfInputStream = mediacodec_ndk_signalEndOfInputStream,
+     .setAsyncNotifyCallback = mediacodec_ndk_setAsyncNotifyCallback,
++    .setOutputSurface = mediacodec_ndk_setOutputSurface,
+ };
+ 
+ FFAMediaFormat *ff_AMediaFormat_new(int ndk)
+--- a/libavcodec/mediacodec_wrapper.h
++++ b/libavcodec/mediacodec_wrapper.h
+@@ -240,6 +240,10 @@
+     int (*setAsyncNotifyCallback)(FFAMediaCodec *codec,
+                                   const FFAMediaCodecOnAsyncNotifyCallback *callback,
+                                   void *userdata);
++
++    // For a running decoder that was configured with a surface: another
++    // surface to draw into from here on. Introduced in Android API 23.
++    int (*setOutputSurface)(FFAMediaCodec *codec, FFANativeWindow *surface);
+ };
+ 
+ static inline char *ff_AMediaCodec_getName(FFAMediaCodec *codec)
+@@ -257,6 +261,12 @@
+                                            void *crypto, uint32_t flags)
+ {
+     return codec->configure(codec, format, surface, crypto, flags);
++}
++
++static inline int ff_AMediaCodec_setOutputSurface(FFAMediaCodec *codec,
++                                                  FFANativeWindow *surface)
++{
++    return codec->setOutputSurface(codec, surface);
+ }
+ 
+ static inline int ff_AMediaCodec_start(FFAMediaCodec* codec)
+--- a/libavcodec/mediacodecdec_common.c
++++ b/libavcodec/mediacodecdec_common.c
+@@ -26,6 +26,7 @@
+ #include "libavutil/avassert.h"
+ #include "libavutil/common.h"
+ #include "libavutil/hwcontext_mediacodec.h"
++#include "libavutil/hwcontext_mediacodec_internal.h"
+ #include "libavutil/mem.h"
+ #include "libavutil/log.h"
+ #include "libavutil/pixfmt.h"
+@@ -736,6 +737,40 @@
+         av_log(avctx, AV_LOG_ERROR, "Failed to flush codec\n");
+         return AVERROR_EXTERNAL;
+     }
++
++    return 0;
++}
++
++/* The device hands the running decoder another surface. Called with the
++ * device's lock held, on whatever thread asked the device, while this
++ * decoder is bound to it: so not before it has started, and not once its
++ * closing has begun. */
++static int mediacodec_dec_set_output_surface(void *opaque, void *surface, void *native_window)
++{
++    MediaCodecDecContext *s = opaque;
++    FFANativeWindow *current = s->surface;
++    FFANativeWindow *next;
++    int ret;
++
++    if (!s->codec || !current)
++        return AVERROR(EINVAL);
++
++    next = ff_mediacodec_surface_ref(surface, native_window, NULL);
++    if (!next)
++        return AVERROR_EXTERNAL;
++
++    ret = ff_AMediaCodec_setOutputSurface(s->codec, next);
++    if (ret < 0) {
++        ff_mediacodec_surface_unref(next, NULL);
++        return ret;
++    }
++
++    /* What the decoder holds of its surface changes hands inside the
++     * structure the decoding thread knows: that thread asks only whether
++     * there is one, and there still is. */
++    FFSWAP(FFANativeWindow, *current, *next);
++    ff_mediacodec_surface_unref(next, NULL);
++    av_log(NULL, AV_LOG_INFO, "MediaCodec %p draws into another surface\n", s->codec);
+ 
+     return 0;
+ }
+@@ -760,8 +795,17 @@
+             if (device_ctx->type == AV_HWDEVICE_TYPE_MEDIACODEC) {
+                 if (device_ctx->hwctx) {
+                     AVMediaCodecDeviceContext *mediacodec_ctx = (AVMediaCodecDeviceContext *)device_ctx->hwctx;
++                    /* Read and referenced in one hold of the device: it
++                     * may be handed another surface at any moment, and the
++                     * one it had is then its caller's to let go of. */
++                    avpriv_mediacodec_device_lock(device_ctx);
+                     s->surface = ff_mediacodec_surface_ref(mediacodec_ctx->surface, mediacodec_ctx->native_window, avctx);
++                    s->device_surface = mediacodec_ctx->surface;
++                    s->device_native_window = mediacodec_ctx->native_window;
++                    avpriv_mediacodec_device_unlock(device_ctx);
+                     av_log(avctx, AV_LOG_INFO, "Using surface %p\n", s->surface);
++                    if (s->surface)
++                        s->surface_device = av_buffer_ref(avctx->hw_device_ctx);
+                 }
+             }
+         }
+@@ -882,6 +926,13 @@
+     }
+ 
+     av_log(avctx, AV_LOG_DEBUG, "MediaCodec %p started successfully\n", s->codec);
++
++    /* From here on the device can hand this decoder another surface. */
++    if (s->surface && s->surface_device) {
++        avpriv_mediacodec_device_bind((AVHWDeviceContext *)s->surface_device->data,
++                                      mediacodec_dec_set_output_surface, s,
++                                      s->device_surface, s->device_native_window);
++    }
+ 
+     return 0;
+ 
+@@ -1133,6 +1184,13 @@
+     if (!s)
+         return 0;
+ 
++    /* Before anything of the decoder goes: when this has returned, nothing
++     * hands it another surface, and nothing is in the middle of it. */
++    if (s->surface_device) {
++        avpriv_mediacodec_device_unbind((AVHWDeviceContext *)s->surface_device->data, s);
++        av_buffer_unref(&s->surface_device);
++    }
++
+     if (s->codec) {
+         if (atomic_load(&s->hw_buffer_count) == 0) {
+             ff_AMediaCodec_stop(s->codec);
+--- a/libavcodec/mediacodecdec_common.h
++++ b/libavcodec/mediacodecdec_common.h
+@@ -46,6 +46,12 @@
+     FFAMediaFormat *format;
+ 
+     void *surface;
++    /* The device the surface is the default of, while it can hand this
++     * decoder another one (av_mediacodec_device_set_output_surface). */
++    AVBufferRef *surface_device;
++    /* What the device named as its surface when this decoder read it. */
++    void *device_surface;
++    void *device_native_window;
+ 
+     int started;
+     int draining;
+--- a/libavutil/hwcontext_mediacodec.c
++++ b/libavutil/hwcontext_mediacodec.c
+@@ -27,15 +27,119 @@
+ #include "hwcontext.h"
+ #include "hwcontext_internal.h"
+ #include "hwcontext_mediacodec.h"
++#include "hwcontext_mediacodec_internal.h"
++#include "thread.h"
+ 
+ typedef struct MediaCodecDeviceContext {
+     AVMediaCodecDeviceContext ctx;
+ 
+     void *libmedia;
+     media_status_t (*create_surface)(ANativeWindow **surface);
++
++    /* Guards the surface a running decoder is moved to, and who is moved:
++     * a decoder is closed on one thread while whoever shows its pictures
++     * hands it another surface on another. */
++    AVMutex lock;
++    int has_lock;
++    /* The decoder that draws into the device's surface, while it runs. */
++    AVMediaCodecSetSurface set_surface;
++    void *decoder;
++    /* A decoder was bound once, and is no more. */
++    int decoder_has_closed;
+ } MediaCodecDeviceContext;
+ 
++static int mc_device_lock(MediaCodecDeviceContext *s)
++{
++    if (!s->has_lock)
++        return 0;
++    ff_mutex_lock(&s->lock);
++    return 1;
++}
+ 
++int av_mediacodec_device_set_output_surface(AVHWDeviceContext *ctx,
++                                            void *surface, void *native_window)
++{
++    MediaCodecDeviceContext *s;
++    AVMediaCodecDeviceContext *dev;
++    int ret;
++
++    if (!ctx || ctx->type != AV_HWDEVICE_TYPE_MEDIACODEC || (!surface && !native_window))
++        return AVERROR(EINVAL);
++    s = ctx->hwctx;
++    dev = &s->ctx;
++    /* A device that was never initialised has no decoder either. */
++    if (!mc_device_lock(s))
++        return AVERROR(EINVAL);
++
++    if (s->set_surface) {
++        ret = s->set_surface(s->decoder, surface, native_window);
++    } else {
++        ret = s->decoder_has_closed ? 2 : 1;
++    }
++    if (ret >= 0) {
++        dev->surface = surface;
++        dev->native_window = native_window;
++    }
++
++    ff_mutex_unlock(&s->lock);
++    return ret;
++}
++
++void avpriv_mediacodec_device_lock(AVHWDeviceContext *ctx)
++{
++    MediaCodecDeviceContext *s = ctx->hwctx;
++
++    if (s->has_lock)
++        ff_mutex_lock(&s->lock);
++}
++
++void avpriv_mediacodec_device_unlock(AVHWDeviceContext *ctx)
++{
++    MediaCodecDeviceContext *s = ctx->hwctx;
++
++    if (s->has_lock)
++        ff_mutex_unlock(&s->lock);
++}
++
++void avpriv_mediacodec_device_bind(AVHWDeviceContext *ctx, AVMediaCodecSetSurface set,
++                                   void *opaque, void *surface, void *native_window)
++{
++    MediaCodecDeviceContext *s = ctx->hwctx;
++    AVMediaCodecDeviceContext *dev = &s->ctx;
++
++    if (!mc_device_lock(s))
++        return;
++    s->set_surface = set;
++    s->decoder = opaque;
++    s->decoder_has_closed = 0;
++    /* The device was handed another surface between the decoder reading
++     * the one it was configured with and its being bound here: that call
++     * found no decoder to move, and the surface the device has now is the
++     * one the decoder is to draw into. */
++    if ((dev->surface != surface || dev->native_window != native_window)
++        && (dev->surface || dev->native_window)) {
++        if (set(opaque, dev->surface, dev->native_window) < 0)
++            av_log(ctx, AV_LOG_WARNING,
++                   "The decoder did not take the surface its device was handed while it opened\n");
++    }
++    ff_mutex_unlock(&s->lock);
++}
++
++void avpriv_mediacodec_device_unbind(AVHWDeviceContext *ctx, void *opaque)
++{
++    MediaCodecDeviceContext *s = ctx->hwctx;
++
++    if (!mc_device_lock(s))
++        return;
++    if (s->decoder == opaque && s->set_surface) {
++        s->set_surface = NULL;
++        s->decoder = NULL;
++        s->decoder_has_closed = 1;
++    }
++    ff_mutex_unlock(&s->lock);
++}
++
++
+ static int mc_device_create(AVHWDeviceContext *ctx, const char *device,
+                             AVDictionary *opts, int flags)
+ {
+@@ -65,6 +169,12 @@
+     AVMediaCodecDeviceContext *dev = (AVMediaCodecDeviceContext *)s;
+     ANativeWindow *native_window = NULL;
+ 
++    if (!s->has_lock) {
++        if (ff_mutex_init(&s->lock, NULL))
++            return AVERROR(ENOMEM);
++        s->has_lock = 1;
++    }
++
+     if (dev->surface)
+         return 0;
+ 
+@@ -93,6 +203,11 @@
+ {
+     MediaCodecDeviceContext *s = ctx->hwctx;
+     AVMediaCodecDeviceContext *dev = ctx->hwctx;
++
++    if (s->has_lock) {
++        ff_mutex_destroy(&s->lock);
++        s->has_lock = 0;
++    }
+     if (!s->libmedia)
+         return;
+ 
+--- a/libavutil/hwcontext_mediacodec.h
++++ b/libavutil/hwcontext_mediacodec.h
+@@ -58,4 +58,39 @@
+     int create_window;
+ } AVMediaCodecDeviceContext;
+ 
++struct AVHWDeviceContext;
++
++/**
++ * Hand the decoder that was opened with this device another surface to draw
++ * into, while it runs (android/media/MediaCodec#setOutputSurface, Android
++ * API 23). Buffers the decoder gave before and that are rendered after this
++ * returns go to the new surface; nothing of the decoder draws into the old
++ * one once this has returned.
++ *
++ * The device's own surface and native_window are set to the ones given
++ * whenever the call does not fail, so that a decoder opened with the device
++ * later is configured with them. As with the fields themselves, both have
++ * to stay valid for as long as the device may hand them to a decoder; a
++ * decoder that draws into them keeps references of its own.
++ *
++ * It may be called on any thread, also while the decoder is being fed,
++ * flushed or closed on another.
++ *
++ * @param ctx           a device of type AV_HWDEVICE_TYPE_MEDIACODEC
++ * @param surface       android/view/Surface reference. A decoder that
++ *                      reaches MediaCodec through Java needs it.
++ * @param native_window the same surface as an ANativeWindow, or NULL
++ * @return 0 when a running decoder draws into the new surface now;
++ *         1 when no decoder has been opened with the device yet: the next
++ *         one is configured with the new surface;
++ *         2 when the decoder that was opened with the device has been
++ *         closed. It may still be connected to the surface it drew into
++ *         last, until every buffer it gave is released;
++ *         a negative AVERROR code when the decoder did not take the
++ *         surface: it goes on drawing into the one it had, and the device's
++ *         fields are left as they were.
++ */
++int av_mediacodec_device_set_output_surface(struct AVHWDeviceContext *ctx,
++                                            void *surface, void *native_window);
++
+ #endif /* AVUTIL_HWCONTEXT_MEDIACODEC_H */
+--- /dev/null
++++ b/libavutil/hwcontext_mediacodec_internal.h
+@@ -0,0 +1,57 @@
++/*
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++#ifndef AVUTIL_HWCONTEXT_MEDIACODEC_INTERNAL_H
++#define AVUTIL_HWCONTEXT_MEDIACODEC_INTERNAL_H
++
++#include "hwcontext.h"
++
++/**
++ * What a decoder does when it is handed another surface: 0 when it draws
++ * into it from here on, a negative AVERROR code when it does not.
++ */
++typedef int (*AVMediaCodecSetSurface)(void *opaque, void *surface, void *native_window);
++
++/**
++ * Holds the device's surface and native_window as they are, from the lock
++ * to the unlock: a decoder reads them and takes its own references to what
++ * they name in between, so that neither is let go of under it by a caller
++ * that has just handed the device another surface.
++ */
++void avpriv_mediacodec_device_lock(AVHWDeviceContext *ctx);
++void avpriv_mediacodec_device_unlock(AVHWDeviceContext *ctx);
++
++/**
++ * Says that a running decoder draws into the device's surface, and how it
++ * is handed another (av_mediacodec_device_set_output_surface). A device
++ * moves one decoder: the last that was bound.
++ *
++ * The device may have been given another surface since the decoder read
++ * the one it was configured with, which was `surface` and `native_window`:
++ * then the decoder is handed that one here, before this returns.
++ */
++void avpriv_mediacodec_device_bind(AVHWDeviceContext *ctx, AVMediaCodecSetSurface set,
++                                   void *opaque, void *surface, void *native_window);
++
++/**
++ * Says that the decoder bound with `opaque` is being closed. When this has
++ * returned the device calls it no more.
++ */
++void avpriv_mediacodec_device_unbind(AVHWDeviceContext *ctx, void *opaque);
++
++#endif /* AVUTIL_HWCONTEXT_MEDIACODEC_INTERNAL_H */

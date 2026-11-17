@@ -1,0 +1,129 @@
+tls (OpenSSL): the roots named in SSL_CERT_FILE, read once for every connection
+
+On Android FFmpeg's connections are judged against the roots the app
+writes to a file (Android's own: the system's, less the ones the user
+turned off, and the ones the user added) and names in SSL_CERT_FILE.
+Two things stood in the way of that.
+
+OpenSSL reads SSL_CERT_FILE only where the kernel did not mark the
+process as started with other rights than its parent's (AT_SECURE).
+An Android app's process is so marked (seen on Android 15), so OpenSSL
+read no file, had no roots, and turned down every certificate: a public
+https stream failed with "unable to get local issuer certificate".
+
+And OpenSSL read that file whole for every connection, ahead of its
+handshake (SSL_CTX_set_default_verify_paths). With Android's roots, 145
+certificates in 218 KB, that is about 3 ms of every connection on an
+emulator on an Apple M-series Mac, and more on the slower processors of
+phones and television boxes; an HLS stream whose server does not keep
+its connections open makes one for every part.
+
+So a connection that names no file of its own (`ca_file`) now takes the
+roots of the file named in SSL_CERT_FILE, read with the plain getenv, from
+one store read once and shared. The file's inode, size and time are
+looked at for every connection, and the store is read again when they
+change, so roots the app writes anew reach the next connection; one that
+already took the old store keeps it. When no file is named, or it cannot
+be read, a connection reads OpenSSL's defaults as before.
+
+--- a/libavformat/tls_openssl.c	2026-11-16 23:26:13
++++ b/libavformat/tls_openssl.c	2026-11-16 23:39:03
+@@ -26,6 +26,8 @@
+ #include "network.h"
+ #include "os_support.h"
+ #include "libavutil/avstring.h"
++#include "libavutil/mem.h"
++#include "libavutil/thread.h"
+ #include "libavutil/time.h"
+ #include "libavutil/random_seed.h"
+ #include "url.h"
+@@ -39,7 +41,9 @@
+ #if HAVE_SYS_TIME_H
+ #include <sys/time.h>
+ #endif
++#include <stdlib.h>
+ #include <string.h>
++#include <sys/stat.h>
+ 
+ #define DTLS_HANDSHAKE_TIMEOUT_US 30000000
+ /**
+@@ -792,6 +796,70 @@
+     if (!(h->flags & AVIO_FLAG_NONBLOCK))
+         c->tls_shared.udp->flags &= ~AVIO_FLAG_NONBLOCK;
+     return ret;
++}
++
++/* The roots a connection that names no file of its own is judged against:
++ * the ones in the file named in SSL_CERT_FILE, read once and shared by
++ * every such connection.
++ *
++ * OpenSSL reads that variable itself, but not in a process the kernel
++ * marked as started with other rights than its parent's (AT_SECURE), and
++ * an Android app's process is so marked (seen on Android 15): it would
++ * read nothing there, and every certificate would be turned down. The app
++ * names the file itself, after it has started, so nothing is taken from
++ * whoever started it.
++ *
++ * And OpenSSL read the file whole for every connection, ahead of its
++ * handshake: with Android's roots, 145 certificates, about 3 ms on an
++ * emulator on a fast Mac and more on a slow box, and a playlist's parts
++ * may each open a connection of their own. Here the file is looked at (its
++ * inode, size and time) at every connection and read again only when it
++ * has changed, so that roots written anew, one the user added or turned
++ * off, reach the next connection.
++ *
++ * 0 when no file is named or it cannot be read: the connection then reads
++ * OpenSSL's defaults, as it did before. */
++static AVMutex default_roots_mutex = AV_MUTEX_INITIALIZER;
++static X509_STORE *default_roots;
++static char *default_roots_path;
++static struct stat default_roots_file;
++
++static int use_shared_default_roots(TLSContext *c)
++{
++    const char *path = getenv(X509_get_default_cert_file_env());
++    struct stat file;
++    X509_STORE *roots = NULL;
++
++    if (!path || !*path || stat(path, &file) < 0)
++        return 0;
++    ff_mutex_lock(&default_roots_mutex);
++    if (default_roots && !strcmp(default_roots_path, path) &&
++        file.st_ino == default_roots_file.st_ino && file.st_size == default_roots_file.st_size &&
++        file.st_mtim.tv_sec == default_roots_file.st_mtim.tv_sec &&
++        file.st_mtim.tv_nsec == default_roots_file.st_mtim.tv_nsec) {
++        roots = default_roots;
++    } else if ((roots = X509_STORE_new()) && X509_STORE_load_file(roots, path) == 1) {
++        char *copy = av_strdup(path);
++        if (copy) {
++            /* A connection that took the roots read before keeps them. */
++            X509_STORE_free(default_roots);
++            av_free(default_roots_path);
++            default_roots = roots;
++            default_roots_path = copy;
++            default_roots_file = file;
++        } else {
++            X509_STORE_free(roots);
++            roots = NULL;
++        }
++    } else {
++        X509_STORE_free(roots);
++        roots = NULL;
++        ERR_clear_error();
++    }
++    if (roots)
++        SSL_CTX_set1_cert_store(c->ctx, roots);
++    ff_mutex_unlock(&default_roots_mutex);
++    return !!roots;
+ }
+ 
+ static av_cold int openssl_init_ca_key_cert(URLContext *h)
+@@ -805,7 +873,7 @@
+     if (s->ca_file) {
+         if (!SSL_CTX_load_verify_locations(c->ctx, s->ca_file, NULL))
+             av_log(h, AV_LOG_ERROR, "SSL_CTX_load_verify_locations %s\n", openssl_get_error(c));
+-    } else {
++    } else if (!use_shared_default_roots(c)) {
+         if (!SSL_CTX_set_default_verify_paths(c->ctx)) {
+             // Only log the failure but do not error out, as this is not fatal
+             av_log(h, AV_LOG_WARNING, "Failure setting default verify locations: %s\n",

@@ -1,0 +1,145 @@
+tls (OpenSSL): a certificate the caller trusts by itself, and which one was turned down
+
+What CeauKit's Patches/ffmpeg/0012 does for Secure Transport, for
+OpenSSL, with the same option and the same entry, so that the engine
+asks and is told the same on Android.
+
+A media server on a home network shows a certificate nothing vouches
+for but itself. The handshake fails, as it should for a stranger. A
+person who has been shown that certificate and said "this is my server"
+has no way to be heard: the choices were to verify every certificate
+against the roots or to verify none.
+
+With the `trusted_cert_sha256` option a caller names one certificate by
+the SHA-256 of it as it is sent, in hexadecimal, colons or not. A peer
+that shows exactly that certificate is taken as it is, whatever else is
+the matter with it (no root, run out, written for another name): the
+peer holds its key, and that certificate is what was trusted. Any other
+certificate is judged as it was before, against the roots and the name,
+so a server with a certificate the roots vouch for still connects, and
+a different one that nothing vouches for is still turned down.
+
+So that a caller can ask somebody whether to trust a certificate at
+all, a handshake that fails over the certificate says which one it was:
+the same digest, as `refused_cert_sha256` among the options the caller
+gets back from the opening that failed.
+
+To do either, a client that verifies judges the server's chain itself
+(SSL_CTX_set_cert_verify_callback): the certificate it trusts by itself
+is taken there, and any other is handed to X509_verify_cert, which is
+what OpenSSL does when no one judges in its place.
+
+--- a/libavformat/tls_openssl.c	2026-11-16 23:23:29
++++ b/libavformat/tls_openssl.c	2026-11-16 23:23:29
+@@ -22,8 +22,10 @@
+ 
+ #include "config_components.h"
+ 
++#include "internal.h"
+ #include "network.h"
+ #include "os_support.h"
++#include "libavutil/avstring.h"
+ #include "libavutil/time.h"
+ #include "libavutil/random_seed.h"
+ #include "url.h"
+@@ -430,6 +432,8 @@
+     char error_message[256];
+     struct sockaddr_storage dest_addr;
+     socklen_t dest_addr_len;
++    char *trusted_cert_sha256;
++    char refused_cert_sha256[65];
+ } TLSContext;
+ 
+ /**
+@@ -549,7 +553,59 @@
+     }
+     return 0;
+ }
++
++/* The SHA-256 of a certificate as it was sent: what a person compares two
++ * certificates by. Written as 64 lower-case hexadecimal digits. */
++static int cert_sha256(X509 *cert, char hex[65])
++{
++    uint8_t digest[EVP_MAX_MD_SIZE];
++    unsigned int size = 0;
+ 
++    if (!cert || X509_digest(cert, EVP_sha256(), digest, &size) != 1 || size != 32)
++        return AVERROR_UNKNOWN;
++    ff_data_to_hex(hex, digest, 32, 1);
++    return 0;
++}
++
++/* Whether a digest as a caller wrote it, in either case and with or without
++ * colons between its bytes, is the one in `hex`. */
++static int is_sha256(const char *stated, const char *hex)
++{
++    for (; *stated; stated++) {
++        if (*stated == ':' || *stated == ' ')
++            continue;
++        if (!*hex || av_tolower(*stated) != *hex)
++            return 0;
++        hex++;
++    }
++    return !*hex;
++}
++
++/* Judges the chain a server showed, in OpenSSL's place. The certificate the
++ * caller said it trusts (`trusted_cert_sha256`) is taken as it is: whatever
++ * else is the matter with it (no root, run out, written for another name),
++ * the peer that shows it holds its key, and that certificate is what was
++ * trusted. Any other is judged as OpenSSL would have judged it, against
++ * the roots and the name, and one that is turned down is kept, so that the
++ * caller can be told which it was. */
++static int verify_server_chain(X509_STORE_CTX *store, void *arg)
++{
++    TLSContext *c = arg;
++    char shown[65] = "";
++    int ok;
++
++    if (cert_sha256(X509_STORE_CTX_get0_cert(store), shown) < 0)
++        shown[0] = 0;
++    if (c->trusted_cert_sha256 && shown[0] && is_sha256(c->trusted_cert_sha256, shown)) {
++        X509_STORE_CTX_set_error(store, X509_V_OK);
++        return 1;
++    }
++    ok = X509_verify_cert(store);
++    if (ok <= 0)
++        av_strlcpy(c->refused_cert_sha256, shown, sizeof(c->refused_cert_sha256));
++    return ok;
++}
++
+ static int tls_close(URLContext *h)
+ {
+     TLSContext *c = h->priv_data;
+@@ -861,6 +917,11 @@
+ 
+     if (s->verify)
+         SSL_CTX_set_verify(c->ctx, SSL_VERIFY_PEER|SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
++    /* A client judges the certificate the server shows itself: that is
++     * where a certificate the caller trusts by itself is known, and where
++     * one that is turned down can be named. */
++    if (s->verify && !s->listen)
++        SSL_CTX_set_cert_verify_callback(c->ctx, verify_server_chain, c);
+ 
+     if (s->is_dtls && s->use_srtp) {
+         /**
+@@ -971,6 +1032,11 @@
+             }
+             if (cause)
+                 ret = cause;
++            /* Which certificate it was that is turned down, for a caller
++             * that means to ask somebody whether to trust it: left among
++             * the options it gets back. */
++            if (cause == FFERRTAG(0xF8, 'C', 'R', 'T') && c->refused_cert_sha256[0] && options)
++                av_dict_set(options, "refused_cert_sha256", c->refused_cert_sha256, 0);
+             goto fail;
+         }
+     }
+@@ -1046,6 +1112,7 @@
+ 
+ static const AVOption options[] = {
+     TLS_COMMON_OPTIONS(TLSContext, tls_shared),
++    { "trusted_cert_sha256", "Take the peer's certificate as it is when this is its SHA-256, in hexadecimal", offsetof(TLSContext, trusted_cert_sha256), AV_OPT_TYPE_STRING, .flags = TLS_OPTFL },
+     { NULL }
+ };
+ 

@@ -1,0 +1,548 @@
+fontselect: Android's fonts for the letters no other font has
+
+libass knows three ways of asking a system for fonts, Core Text, fontconfig
+and DirectWrite, and Android has none of them, so a build for Android had
+no font provider at all. A host could hand it font files and name a family
+and a file to fall back on, but a letter none of those has was drawn as an
+empty box: libass looks for a letter in another font only by asking the
+default provider (get_fallback), and the fonts handed over are found by the
+family names a style gives and by nothing else. A subtitle in Arabic,
+Hebrew, Thai or a script of India, under a style that names Arial, came
+out as boxes.
+
+This adds a provider of Android's (libass/ass_android.c, "android",
+ASS_FONTPROVIDER_ANDROID, chosen by ASS_FONTPROVIDER_AUTODETECT). Its one
+callback of substance is get_fallback: it asks the NDK's AFontMatcher
+(Android 10, API 29) which font Android's own text stack draws the letter
+in, checks that the font has it, lists the font with libass under a family
+name of its own, and answers with that name; libass then opens the font by
+its path, as it opens any font file. The bold of that font is listed under
+the same name where the system has a separate file for it. Letters are
+remembered with their answer, since libass asks again for a letter no font
+has each time a line holding it is laid out.
+
+It never matches a style's family name against the system's fonts: that
+would mean opening every font the system has, and it would change what the
+host chose for a line whose font nobody has. For the same reason the
+default font (ass_set_fonts' default path), which on Android is the font
+the host chose for the reader's script, keeps every letter it has: in
+ass_font_select, the provider is asked only when that font lacks the
+letter. So a line looks as it did with no provider at all, less the boxes.
+
+Two limits of libass's own go with it. A font of a line's style held ten
+faces at most, for the whole track, and with fonts found a letter at a time
+every script a track uses takes one: a track in nine scripts spent all ten,
+and its Mongolian and Cherokee were boxes. It holds 32 now. And the default
+font was given no id when it was chosen, so a font that had it as a face
+already opened another copy of it for every letter no font has, until it
+had no room left for a font that has a letter; it has one id now.
+
+The provider is compiled by the build script on its own (Makefile.in does
+not know the file) and libass is linked with -landroid.
+
+--- a/libass/ass.h
++++ b/libass/ass.h
+@@ -219,6 +219,8 @@
+  * CORETEXT force a CoreText based font provider (OS X only)
+  * DIRECTWRITE force a DirectWrite based font provider (Microsoft Win32 only)
+  * FONTCONFIG force a Fontconfig based font provider
++ * ANDROID force Android's fonts, for the letters no other font has
++ *         (Android 10 and later; an addition of Ceau's build for Android)
+  *
+  * libass uses the best shaper available by default.
+  */
+@@ -228,6 +230,7 @@
+     ASS_FONTPROVIDER_CORETEXT,
+     ASS_FONTPROVIDER_FONTCONFIG,
+     ASS_FONTPROVIDER_DIRECTWRITE,
++    ASS_FONTPROVIDER_ANDROID,
+ } ASS_DefaultFontProvider;
+ 
+ typedef enum {
+--- a/libass/ass_android.c
++++ b/libass/ass_android.c
+@@ -0,0 +1,334 @@
++/*
++ * This file is part of libass, as Ceau builds it for Android.
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++/*
++ * Android's fonts, for the letters no other font has.
++ *
++ * Android has no font service libass knows (Core Text, fontconfig,
++ * DirectWrite), but it says, through the NDK's AFontMatcher (Android 10,
++ * API 29), which of its fonts its own text stack draws a letter in. That is
++ * what this provider asks, for a letter that none of the fonts already
++ * chosen for a line has: an Arabic, Hebrew, Thai or Devanagari letter in a
++ * line whose font is the host's font for Chinese, say. It answers with the
++ * system's font that has the letter, which libass then opens by its path,
++ * as it opens any font file: read through FreeType as it is needed, never
++ * whole into memory.
++ *
++ * It does nothing else. Android lists its fonts (ASystemFontIterator) but
++ * not what they are called, and its matcher knows only its own family
++ * names (sans-serif, serif, and aliases such as Arial for sans-serif), so a
++ * style's font could be found among the system's only by opening every
++ * font the system has. A style's font is looked for among the media's fonts
++ * and the host's only, as it was before this provider; and the font the
++ * host stated as the default keeps every letter it has (ass_font_select in
++ * ass_fontselect.c asks this provider only for the letters that font
++ * lacks). What a line looked like with no provider at all is what it looks
++ * like now, less the empty boxes.
++ *
++ * AFontMatcher answers from the font collection Android sets up in an
++ * app's process before the app's code runs. A program started from a shell
++ * has none, and AFontMatcher_match crashes there (seen on Android 15): this
++ * provider is for libass loaded by an app.
++ *
++ * Each font found is listed under a family name of its own, which is what
++ * get_fallback answers and nothing else is called, so the font libass
++ * selects for that answer is that font and no other. Its bold, where the
++ * system has a separate file for it (Noto Sans Thai, Hebrew, Naskh Arabic),
++ * is listed under the same name, so that a bold line takes it rather than
++ * a regular one made bold.
++ */
++
++#include "config.h"
++#include "ass_compat.h"
++
++#ifdef __ANDROID__
++
++#include <android/font.h>
++#include <android/font_matcher.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <ft2build.h>
++#include FT_FREETYPE_H
++
++#include "ass_android.h"
++#include "ass_font.h"
++#include "ass_utils.h"
++
++/* Letters remembered with their answer: libass asks again for a letter no
++ * font has each time a line holding it is laid out. */
++#define REMEMBERED_LETTERS 256
++
++/* The family Android's fallback fonts are looked up in. A style's own
++ * family is not passed: Android knows a handful of family names (its
++ * aliases for Arial and Times among them), and for those it would answer
++ * with a font for Latin a style never asked for, where every other name
++ * falls through to this one anyway. */
++#define SYSTEM_FAMILY "sans-serif"
++
++typedef struct {
++    FT_Face face;   // the font's, for asking which letters it has
++} AndroidFontData;
++
++typedef struct {
++    char *path;
++    int index;
++    int family;     // index into the provider's family names
++    AndroidFontData *data;  // the selector's: freed by destroy_font
++} AndroidFont;
++
++typedef struct {
++    ASS_Library *library;
++    FT_Library ftlibrary;
++    ASS_FontProvider *provider;
++    AFontMatcher *matcher;
++
++    AndroidFont *fonts;
++    int n_fonts;
++    int alloc_fonts;
++
++    char **families;
++    int n_families;
++    int alloc_families;
++
++    struct {
++        uint32_t letter;    // 0: nothing remembered here
++        int family;         // -1: no font of the system's has it
++    } remembered[REMEMBERED_LETTERS];
++} AndroidProvider;
++
++static bool has_letter(FT_Face face, uint32_t letter)
++{
++    return face && FT_Get_Char_Index(face, letter) != 0;
++}
++
++static bool check_glyph(void *data, uint32_t codepoint)
++{
++    AndroidFontData *font = data;
++    return !codepoint || has_letter(font->face, codepoint);
++}
++
++static void destroy_font(void *data)
++{
++    AndroidFontData *font = data;
++    if (font->face)
++        FT_Done_Face(font->face);
++    free(font);
++}
++
++static void destroy_provider(void *data)
++{
++    AndroidProvider *android = data;
++    // The fonts' own data went with destroy_font, before this.
++    for (int i = 0; i < android->n_fonts; i++)
++        free(android->fonts[i].path);
++    free(android->fonts);
++    for (int i = 0; i < android->n_families; i++)
++        free(android->families[i]);
++    free(android->families);
++    if (android->matcher)
++        AFontMatcher_destroy(android->matcher);
++    free(android);
++}
++
++/* The letter as UTF-16, which is what AFontMatcher reads. */
++static uint32_t utf16(uint32_t letter, uint16_t text[2])
++{
++    if (letter < 0x10000) {
++        text[0] = (uint16_t) letter;
++        return 1;
++    }
++    letter -= 0x10000;
++    text[0] = (uint16_t) (0xD800 + (letter >> 10));
++    text[1] = (uint16_t) (0xDC00 + (letter & 0x3FF));
++    return 2;
++}
++
++static int known_font(AndroidProvider *android, const char *path, int index)
++{
++    for (int i = 0; i < android->n_fonts; i++)
++        if (android->fonts[i].index == index && !strcmp(android->fonts[i].path, path))
++            return i;
++    return -1;
++}
++
++/* A family name for the fonts found next, one no real family has. */
++static int new_family(AndroidProvider *android)
++{
++    if (android->n_families >= android->alloc_families) {
++        int alloc = FFMAX(8, 2 * android->alloc_families);
++        char **families = realloc(android->families, alloc * sizeof(char *));
++        if (!families)
++            return -1;
++        android->families = families;
++        android->alloc_families = alloc;
++    }
++    char name[48];
++    snprintf(name, sizeof(name), "ceau-android-fallback-%d", android->n_families);
++    char *copy = strdup(name);
++    if (!copy)
++        return -1;
++    android->families[android->n_families] = copy;
++    return android->n_families++;
++}
++
++/*
++ * Lists the font AFontMatcher answered with under the family, with libass
++ * and here. The font is opened to be asked which letters it has, and kept
++ * open for that: the face is FreeType's view of the file, which reads it
++ * as it is asked. Returns the font's place here, or -1.
++ */
++static int add_font(AndroidProvider *android, AFont *found, int family)
++{
++    const char *path = AFont_getFontFilePath(found);
++    int index = (int) AFont_getCollectionIndex(found);
++    if (!path || !*path)
++        return -1;
++    FT_Face face = ass_face_open(android->library, android->ftlibrary, path, NULL, index);
++    if (!face)
++        return -1;
++    ass_charmap_magic(android->library, face);
++
++    if (android->n_fonts >= android->alloc_fonts) {
++        int alloc = FFMAX(8, 2 * android->alloc_fonts);
++        AndroidFont *fonts = realloc(android->fonts, alloc * sizeof(AndroidFont));
++        if (!fonts) {
++            FT_Done_Face(face);
++            return -1;
++        }
++        android->fonts = fonts;
++        android->alloc_fonts = alloc;
++    }
++    char *path_copy = strdup(path);
++    AndroidFontData *data = calloc(1, sizeof(AndroidFontData));
++    if (!path_copy || !data) {
++        free(path_copy);
++        free(data);
++        FT_Done_Face(face);
++        return -1;
++    }
++    data->face = face;
++
++    char *name = android->families[family];
++    ASS_FontProviderMetaData meta = {
++        .families = &name,
++        .n_family = 1,
++        .extended_family = name,
++        .weight = AFont_getWeight(found),
++        .style_flags = AFont_isItalic(found) ? FT_STYLE_FLAG_ITALIC : 0,
++    };
++    // On failure libass has destroyed the font's data itself.
++    if (!ass_font_provider_add_font(android->provider, &meta, path, index, data)) {
++        free(path_copy);
++        return -1;
++    }
++    AndroidFont *font = &android->fonts[android->n_fonts];
++    font->path = path_copy;
++    font->index = index;
++    font->family = family;
++    font->data = data;
++    ass_msg(android->library, MSGL_INFO, "android: listed %s, %d (weight %d) as %s",
++            path, index, meta.weight, name);
++    return android->n_fonts++;
++}
++
++/*
++ * The family of the system's font for the letter: the font Android's text
++ * stack draws it in, and the bold of that font where it has a file of its
++ * own. -1 when that font does not have the letter either: AFontMatcher
++ * answers with some font whatever the letter, so that a box is drawn.
++ */
++static int family_for(AndroidProvider *android, uint32_t letter)
++{
++    uint16_t text[2];
++    uint32_t length = utf16(letter, text);
++
++    AFontMatcher_setStyle(android->matcher, AFONT_WEIGHT_NORMAL, false);
++    AFont *regular = AFontMatcher_match(android->matcher, SYSTEM_FAMILY, text, length, NULL);
++    const char *path = AFont_getFontFilePath(regular);
++    int known = path ? known_font(android, path, (int) AFont_getCollectionIndex(regular)) : -1;
++    if (known < 0) {
++        int family = new_family(android);
++        known = family < 0 ? -1 : add_font(android, regular, family);
++        if (known >= 0) {
++            AFontMatcher_setStyle(android->matcher, AFONT_WEIGHT_BOLD, false);
++            AFont *bold = AFontMatcher_match(android->matcher, SYSTEM_FAMILY, text, length, NULL);
++            const char *bold_path = AFont_getFontFilePath(bold);
++            if (bold_path && known_font(android, bold_path, (int) AFont_getCollectionIndex(bold)) < 0)
++                add_font(android, bold, family);
++            AFont_close(bold);
++        }
++    }
++    AFont_close(regular);
++    if (known < 0 || !has_letter(android->fonts[known].data->face, letter))
++        return -1;
++    return android->fonts[known].family;
++}
++
++static char *get_fallback(void *data, ASS_Library *lib, const char *family,
++                          uint32_t codepoint)
++{
++    AndroidProvider *android = data;
++    // 0 is asked for a line's first font, when the host stated no default
++    // font: the system's font for Latin then.
++    uint32_t letter = codepoint ? codepoint : 'a';
++    unsigned slot = letter % REMEMBERED_LETTERS;
++    int found;
++    if (android->remembered[slot].letter == letter) {
++        found = android->remembered[slot].family;
++    } else {
++        found = family_for(android, letter);
++        android->remembered[slot].letter = letter;
++        android->remembered[slot].family = found;
++        if (found < 0)
++            ass_msg(lib, MSGL_INFO, "android: no font of the system's has U+%04X", letter);
++    }
++    return found < 0 ? NULL : strdup(android->families[found]);
++}
++
++static ASS_FontProviderFuncs android_callbacks = {
++    .check_glyph        = check_glyph,
++    .destroy_font       = destroy_font,
++    .destroy_provider   = destroy_provider,
++    .get_fallback       = get_fallback,
++};
++
++ASS_FontProvider *
++ass_android_add_provider(ASS_Library *lib, ASS_FontSelector *selector,
++                         const char *config, FT_Library ftlib)
++{
++    AndroidProvider *android = calloc(1, sizeof(AndroidProvider));
++    if (!android)
++        return NULL;
++    android->library = lib;
++    android->ftlibrary = ftlib;
++    android->matcher = AFontMatcher_create();
++    // The fonts made for running text rather than for a compact interface:
++    // Noto Sans Thai and not Noto Sans Thai UI, whose marks are squeezed
++    // into a Latin line's height.
++    AFontMatcher_setFamilyVariant(android->matcher, AFAMILY_VARIANT_ELEGANT);
++    android->provider = ass_font_provider_new(selector, &android_callbacks, android);
++    if (!android->provider) {
++        AFontMatcher_destroy(android->matcher);
++        free(android);
++        return NULL;
++    }
++    return android->provider;
++}
++
++#endif
+--- a/libass/ass_android.h
++++ b/libass/ass_android.h
+@@ -0,0 +1,31 @@
++/*
++ * This file is part of libass, as Ceau builds it for Android.
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++#include "ass_types.h"
++#include "ass_fontselect.h"
++
++#ifndef LIBASS_ANDROID_H
++#define LIBASS_ANDROID_H
++
++#ifdef __ANDROID__
++
++ASS_FontProvider *
++ass_android_add_provider(ASS_Library *lib, ASS_FontSelector *selector,
++                         const char *config, FT_Library ftlib);
++
++#endif
++
++#endif
+--- a/libass/ass_font.h
++++ b/libass/ass_font.h
+@@ -34,7 +34,12 @@
+ 
+ #define VERTICAL_LOWER_BOUND 0x02f1
+ 
+-#define ASS_FONT_MAX_FACES 10
++// A font of a line's style holds a face for each font its letters were found
++// in, for the whole track. With a system's fonts found a letter at a time,
++// every script a track uses takes one (each of the scripts of India, Thai,
++// Arabic, a font of symbols): ten were spent by a track in nine scripts, and
++// the letters after that were drawn as boxes.
++#define ASS_FONT_MAX_FACES 32
+ #define DECO_UNDERLINE     1
+ #define DECO_STRIKETHROUGH 2
+ #define DECO_ROTATE        4
+--- a/libass/ass_fontselect.c
++++ b/libass/ass_fontselect.c
+@@ -44,6 +44,7 @@
+ #include "ass_fontconfig.h"
+ #include "ass_coretext.h"
+ #include "ass_directwrite.h"
++#include "ass_android.h"
+ #include "ass_font.h"
+ #include "ass_string.h"
+ 
+@@ -101,6 +102,10 @@
+ 
+     ASS_FontProvider *default_provider;
+     ASS_FontProvider *embedded_provider;
++
++    // the default font, opened to be asked which letters it has
++    FT_Face face_default;
++    bool face_default_failed;
+ };
+ 
+ struct font_provider {
+@@ -871,7 +876,31 @@
+ }
+ 
+ 
++#ifdef __ANDROID__
+ /**
++ * \brief Whether the default font has a glyph for the character. Every font
++ * has one for 0, which is asked for a font's first face. The font is opened
++ * the first time and kept open.
++ */
++static bool default_font_has_glyph(ASS_FontSelector *priv, uint32_t code)
++{
++    if (!priv->path_default)
++        return false;
++    if (!code)
++        return true;
++    if (!priv->face_default && !priv->face_default_failed) {
++        priv->face_default = ass_face_open(priv->library, priv->ftlibrary,
++                priv->path_default, NULL, priv->index_default);
++        if (priv->face_default)
++            ass_charmap_magic(priv->library, priv->face_default);
++        else
++            priv->face_default_failed = true;
++    }
++    return priv->face_default && FT_Get_Char_Index(priv->face_default, code);
++}
++#endif
++
++/**
+  * \brief Find a font. Use default family or path if necessary.
+  * \param family font family
+  * \param treat_family_as_pattern treat family as fontconfig pattern
+@@ -905,7 +934,14 @@
+                     *postscript_name ? *postscript_name : "(none)");
+     }
+ 
+-    if (!res && default_provider && default_provider->funcs.get_fallback) {
++    // On Android the default font is the one the application chose for the
++    // reader's script, and the system's fonts are asked only for the letters
++    // it lacks: a letter it has is drawn in it, as with no provider at all.
++    if (!res && default_provider && default_provider->funcs.get_fallback
++#ifdef __ANDROID__
++            && !default_font_has_glyph(priv, code)
++#endif
++            ) {
+         const char *search_family = family;
+         if (!search_family || !*search_family)
+             search_family = "Arial";
+@@ -922,6 +958,11 @@
+     if (!res && priv->path_default) {
+         res = priv->path_default;
+         *index = priv->index_default;
++        // One id for the default font, which no font of the list has (theirs
++        // start at 1), so that a font that already has it as a face takes it
++        // again rather than opening another copy of it for every letter no
++        // font has, until it has no room left for one that has the letter.
++        *uid = 0;
+         ass_msg(priv->library, MSGL_WARN, "fontselect: Using default font: "
+                 "(%s, %d, %d) -> %s, %d, %s", family, bold, italic,
+                 priv->path_default, *index,
+@@ -1056,6 +1097,9 @@
+ #ifdef CONFIG_FONTCONFIG
+     { ASS_FONTPROVIDER_FONTCONFIG,      &ass_fontconfig_add_provider,   "fontconfig"},
+ #endif
++#ifdef __ANDROID__
++    { ASS_FONTPROVIDER_ANDROID,         &ass_android_add_provider,      "android"},
++#endif
+     { ASS_FONTPROVIDER_NONE, NULL, NULL },
+ };
+ 
+@@ -1160,6 +1204,8 @@
+  */
+ void ass_fontselect_free(ASS_FontSelector *priv)
+ {
++    if (priv->face_default)
++        FT_Done_Face(priv->face_default);
+     if (priv->default_provider)
+         ass_font_provider_free(priv->default_provider);
+     if (priv->embedded_provider)

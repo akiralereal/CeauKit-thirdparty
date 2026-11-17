@@ -3,3 +3,7 @@
 Vendor/
 
 .DS_Store
+
+# The Android build: the sources laid out for it and what it builds.
+android/work/
+android/build/

@@ -3,7 +3,9 @@
 CeauKit is the playback engine of the app Ceau. Its binaries contain builds of
 seven open-source libraries, three of them with changes. This repository holds
 what those builds are made from: the patches, the build scripts, the licence
-texts, and every upstream source archive, with its address and checksum.
+texts, and every upstream source archive, with its address and checksum. Ceau
+for Android builds the same libraries, less two, with OpenSSL and changes of
+its own: see [Android](#android).
 
 CeauKit itself is not in this repository.
 
@@ -43,6 +45,7 @@ The full list of configure options is in
 | `BUILD-INFO/` | A copy of the `BUILD-INFO.txt` each build script wrote into the xcframework it last assembled: versions, checksums, patches, the assembler and the Xcode used, and the time of the build. |
 | `dist/` | The upstream source archives the builds were made from, as they were downloaded: one `.tar.xz` per library. |
 | `SHA256SUMS` | The SHA-256 of each upstream archive. |
+| `android/` | What Ceau for Android adds: its patches and its build scripts (see [Android](#android)). |
 
 ## The patches
 
@@ -164,9 +167,55 @@ library:
 | `LICENSES/HarfBuzz.txt` | HarfBuzz | MIT ("Old MIT") |
 | `LICENSES/FriBidi.txt` | FriBidi | GNU Lesser General Public License, version 2.1 |
 | `LICENSES/libxml2.txt` | libxml2 | MIT |
+| `LICENSES/OpenSSL.txt` | OpenSSL (Android only) | Apache License 2.0 |
 
 Each patch in `Patches/` is offered under the licence of the library it
 changes.
+
+## Android
+
+Ceau for Android packs, for each ABI it ships (arm64-v8a, armeabi-v7a,
+x86_64), these shared libraries: `libavutil.so`, `libswresample.so`,
+`libswscale.so`, `libavcodec.so`, `libavformat.so` and `libavfilter.so`
+(FFmpeg), `libass.so` (libass, with FreeType and HarfBuzz linked into it) and
+`libfribidi.so` (FriBidi, a library of its own, so that it can be exchanged
+like FFmpeg's). They are built from the same archives as above with the same
+patches, and these differences:
+
+- **OpenSSL 3.5.9** takes the place of Secure Transport for https, linked
+  into `libavformat.so`. Its archive is in `dist/`, its licence in
+  `LICENSES/OpenSSL.txt`. OpenSSL 3 is under the Apache License 2.0, which
+  keeps FFmpeg under the LGPL as it is.
+- **MediaCodec** is FFmpeg's hardware decoder there (`--enable-jni
+  --enable-mediacodec`), and VideoToolbox, AudioToolbox and Secure Transport
+  are left out.
+- **dav1d and libxml2 are not built**.
+- **Patches of Android's own**, in `android/Patches/`, applied after the ones
+  above:
+
+| Patch | What it changes |
+| --- | --- |
+| `ffmpeg-android/0001-tls-openssl-a-failed-handshake-says-what-stood-in-the-way` | A handshake that fails says which of two things stood in the way. |
+| `ffmpeg-android/0002-tls-openssl-a-certificate-the-caller-trusts-and-the-one-turned-down` | A certificate the caller trusts by itself, and which one was turned down. |
+| `ffmpeg-android/0003-tls-openssl-the-roots-named-in-ssl-cert-file-read-once-for-every-connection` | The roots named in `SSL_CERT_FILE`, read once for every connection. |
+| `ffmpeg-android/0004-mediacodec-a-decoder-that-stalls-no-longer-holds-its-caller-for-ever` | A decoder that stalls no longer holds its caller for ever. |
+| `ffmpeg-android/0005-mediacodec-a-running-decoder-can-be-handed-another-surface` | A running decoder can be handed another surface. |
+| `ffmpeg-android/0006-mediacodec-a-decoder-that-is-draining-says-a-picture-or-the-end` | A decoder that is draining says a picture or the end. |
+| `ffmpeg-android/0007-mediacodec-a-buffer-let-go-of-after-its-decoder-closed-logs-with-no-context` | A buffer let go of after its decoder closed logs with no context (a crash once its context was freed). |
+| `libass-android/0001-fontselect-android-s-fonts-for-the-letters-no-other-font-has` | A font provider of Android's: a letter the chosen font lacks is drawn in the system's font that has it. |
+
+To build them again from this repository, with the Android NDK (r30), python3
+and, for x86_64, nasm:
+
+```bash
+android/Scripts/prepare-sources.sh
+CEAUKIT="$PWD/android/work/CeauKit" android/Scripts/build-engine-libs.sh arm64-v8a armeabi-v7a x86_64
+```
+
+The first lays `dist/` and `Patches/` out as the Android build reads them;
+the second is a copy of the script the app is built with, and writes each
+ABI's libraries to `android/build/android/<abi>/install/lib`. What was used
+for the current build is in [BUILD-INFO/Android.txt](BUILD-INFO/Android.txt).
 
 ## Releases and tags
 
@@ -180,6 +229,9 @@ never moved, and stays as long as that version is distributed.
 | Version of Ceau | Tag | Released |
 | --- | --- | --- |
 | 3.0.0 (build 25) | [`ceau-3.0.0`](https://github.com/akiralereal/CeauKit-thirdparty/tree/ceau-3.0.0) | November 2026 |
+
+Each version of Ceau for Android gets a tag of its own the same way, named
+`ceau-android-` and its version number. None has been released yet.
 
 To build the libraries of a released version, check out its tag:
 

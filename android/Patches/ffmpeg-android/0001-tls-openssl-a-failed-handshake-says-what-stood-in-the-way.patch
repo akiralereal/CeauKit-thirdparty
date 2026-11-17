@@ -1,0 +1,110 @@
+tls (OpenSSL): a handshake that fails says which of two things stood in the way
+
+Android's FFmpeg makes its secure connections with OpenSSL, where Apple's
+makes them with Secure Transport. CeauKit's Patches/ffmpeg/0008 has every
+handshake Secure Transport fails over one of two things come out with a
+code of its own, and the engine reads the two codes to tell its host why
+a source would not open. This is the same for OpenSSL, with the same two
+codes, so that the engine reads them the same on Android.
+
+The two things are: the server's certificate is not trusted (nothing
+vouches for it but itself, as on most media servers on a home network;
+or it has run out, or is for another name), and no version of TLS, or
+no cipher, key exchange or signature, could be agreed on with the
+server. Every other failure is what it was: an input/output error, or
+what the connection beneath said.
+
+libavutil has a code for neither, so the two are spelled out here and by
+whoever reads them: FFERRTAG(0xF8,'C','R','T') and FFERRTAG(0xF8,'T','L',
+'S'). OpenSSL's reason is read off its error queue before the queue is
+printed and emptied, and the queue is emptied before the handshake, so
+that nothing a failure of another connection on the same thread left in
+it is read as this one's reason.
+
+--- a/libavformat/tls_openssl.c	2026-11-16 23:22:19
++++ b/libavformat/tls_openssl.c	2026-11-16 23:22:47
+@@ -503,6 +503,53 @@
+     return averr;
+ }
+ 
++/* What stood in the way of a handshake, told apart for a caller that has
++ * something different to do about each: a certificate that is not trusted
++ * (nothing vouches for it but itself, as on most media servers on a home
++ * network; or it has run out, or is for another name), and a peer with
++ * which no version of TLS, or no cipher, could be agreed on. Neither has a
++ * code in libavutil. These are the two that Secure Transport gives for
++ * them in CeauKit's build (its Patches/ffmpeg/0008), so that whoever reads
++ * them reads them the same whichever library made the connection:
++ * FFERRTAG(0xF8,'C','R','T') and FFERRTAG(0xF8,'T','L','S'). 0 for any
++ * other failure. Looked at before the error queue is emptied. */
++static int tls_handshake_error(TLSContext *c)
++{
++    unsigned long errors[2] = { ERR_peek_error(), ERR_peek_last_error() };
++
++    for (int i = 0; i < 2; i++) {
++        if (ERR_GET_LIB(errors[i]) != ERR_LIB_SSL)
++            continue;
++        switch (ERR_GET_REASON(errors[i])) {
++        case SSL_R_CERTIFICATE_VERIFY_FAILED:
++            return FFERRTAG(0xF8, 'C', 'R', 'T');
++        /* No version both sides speak: the peer said so, or offered one
++         * this side does not take. */
++        case SSL_R_TLSV1_ALERT_PROTOCOL_VERSION:
++        case SSL_R_UNSUPPORTED_PROTOCOL:
++        case SSL_R_UNSUPPORTED_SSL_VERSION:
++        case SSL_R_VERSION_TOO_LOW:
++        case SSL_R_NO_PROTOCOLS_AVAILABLE:
++        /* No cipher, key exchange or signature both sides take, or one
++         * too weak to be taken. */
++        case SSL_R_SSLV3_ALERT_HANDSHAKE_FAILURE:
++        case SSL_R_TLSV1_ALERT_INSUFFICIENT_SECURITY:
++        case SSL_R_NO_CIPHERS_AVAILABLE:
++        case SSL_R_NO_SHARED_CIPHER:
++        case SSL_R_WRONG_CIPHER_RETURNED:
++        case SSL_R_NO_SHARED_GROUPS:
++        case SSL_R_NO_SUITABLE_GROUPS:
++        case SSL_R_NO_SUITABLE_KEY_SHARE:
++        case SSL_R_WRONG_CURVE:
++        case SSL_R_NO_SHARED_SIGNATURE_ALGORITHMS:
++        case SSL_R_NO_SUITABLE_SIGNATURE_ALGORITHM:
++        case SSL_R_DH_KEY_TOO_SMALL:
++            return FFERRTAG(0xF8, 'T', 'L', 'S');
++        }
++    }
++    return 0;
++}
++
+ static int tls_close(URLContext *h)
+ {
+     TLSContext *c = h->priv_data;
+@@ -907,14 +954,24 @@
+         }
+         av_log(c, AV_LOG_VERBOSE, "Setup ok, MTU=%d\n", c->tls_shared.mtu);
+     } else {
++        /* Nothing left over from another connection of this thread may be
++         * read as this handshake's reason. */
++        ERR_clear_error();
+         ret = s->listen ? SSL_accept(c->ssl) : SSL_connect(c->ssl);
+-        if (ret == 0) {
+-            av_log(h, AV_LOG_ERROR, "Unable to negotiate TLS/SSL session\n");
+-            ret = AVERROR(EIO);
++        if (ret <= 0) {
++            int cause = tls_handshake_error(c);
++            if (cause == FFERRTAG(0xF8, 'C', 'R', 'T'))
++                av_log(h, AV_LOG_ERROR, "The peer's certificate is not trusted: %s\n",
++                       X509_verify_cert_error_string(SSL_get_verify_result(c->ssl)));
++            if (ret == 0) {
++                av_log(h, AV_LOG_ERROR, "Unable to negotiate TLS/SSL session\n");
++                ret = AVERROR(EIO);
++            } else {
++                ret = print_ssl_error(h, ret);
++            }
++            if (cause)
++                ret = cause;
+             goto fail;
+-        } else if (ret < 0) {
+-            ret = print_ssl_error(h, ret);
+-            goto fail;
+         }
+     }
+ 

@@ -1,0 +1,60 @@
+mediacodec: a buffer let go of after its decoder closed logs with no context
+
+A picture of a MediaCodec decoder that draws into a surface is a buffer the
+decoder still owns, and whoever shows it may hold it past the decoder's own
+end: the decoder keeps its MediaCodec until the last such buffer is back
+(MediaCodecDecContext's reference count), and that is what the count is for.
+But giving such a buffer back, with a time, without one or by freeing the
+frame, writes a line to the log first, and writes it with the codec context
+the decoder was opened with, which avcodec_free_context has freed by then.
+av_log reads the AVClass at the head of what it is given before it looks at
+the level, so the line is read out of freed memory whether or not it is
+printed, and where that memory has been given out again the process dies
+(SIGSEGV in av_log, from mediacodec_buffer_release; seen on Android when a
+player opened its media again while the picture output still held pictures
+of the decoder it closed).
+
+With this those three lines name no context. Nothing else of the codec
+context is read there: MediaCodec itself is the decoder context's, which
+lasts as long as a buffer does.
+
+--- a/libavcodec/mediacodec.c
++++ b/libavcodec/mediacodec.c
+@@ -92,7 +92,10 @@
+ 
+     if (!released && (ctx->delay_flush || buffer->serial == atomic_load(&ctx->serial))) {
+         atomic_fetch_sub(&ctx->hw_buffer_count, 1);
+-        av_log(ctx->avctx, AV_LOG_DEBUG,
++        /* Not ctx->avctx: a buffer can be let go of after its decoder
++         * was closed and its codec context freed, and av_log reads
++         * the context it is given. */
++        av_log(NULL, AV_LOG_DEBUG,
+                "Releasing output buffer %zd (%p) ts=%"PRId64" with render=%d [%d pending]\n",
+                buffer->index, buffer, buffer->pts, render, atomic_load(&ctx->hw_buffer_count));
+         return ff_AMediaCodec_releaseOutputBuffer(ctx->codec, buffer->index, render);
+@@ -108,7 +111,10 @@
+ 
+     if (!released && (ctx->delay_flush || buffer->serial == atomic_load(&ctx->serial))) {
+         atomic_fetch_sub(&ctx->hw_buffer_count, 1);
+-        av_log(ctx->avctx, AV_LOG_DEBUG,
++        /* Not ctx->avctx: a buffer can be let go of after its decoder
++         * was closed and its codec context freed, and av_log reads
++         * the context it is given. */
++        av_log(NULL, AV_LOG_DEBUG,
+                "Rendering output buffer %zd (%p) ts=%"PRId64" with time=%"PRId64" [%d pending]\n",
+                buffer->index, buffer, buffer->pts, time, atomic_load(&ctx->hw_buffer_count));
+         return ff_AMediaCodec_releaseOutputBufferAtTime(ctx->codec, buffer->index, time);
+--- a/libavcodec/mediacodecdec_common.c
++++ b/libavcodec/mediacodecdec_common.c
+@@ -284,7 +284,10 @@
+ 
+     if (!released && (ctx->delay_flush || buffer->serial == atomic_load(&ctx->serial))) {
+         atomic_fetch_sub(&ctx->hw_buffer_count, 1);
+-        av_log(ctx->avctx, AV_LOG_DEBUG,
++        /* Not ctx->avctx: a buffer can be let go of after its decoder
++         * was closed and its codec context freed, and av_log reads
++         * the context it is given. */
++        av_log(NULL, AV_LOG_DEBUG,
+                "Releasing output buffer %zd (%p) ts=%"PRId64" on free() [%d pending]\n",
+                buffer->index, buffer, buffer->pts, atomic_load(&ctx->hw_buffer_count));
+         ff_AMediaCodec_releaseOutputBuffer(ctx->codec, buffer->index, 0);

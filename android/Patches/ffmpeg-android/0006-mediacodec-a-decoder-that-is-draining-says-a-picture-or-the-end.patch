@@ -1,0 +1,73 @@
+mediacodec: a decoder that is draining says a picture or the end
+
+After the end of the stream is sent to a MediaCodec decoder,
+avcodec_receive_frame could still answer EAGAIN: whenever the one look it
+takes at MediaCodec's output finds neither a picture nor the end, which is
+what it finds when MediaCodec first says that its output format or its
+buffers have changed, and when nothing comes within a second. A decoder is
+not to say that once it has been told the end, and a caller that goes by the
+rule takes it for "send more", has no more to send, and waits for ever for a
+decoder it believes is still working. The engine did: a live channel that
+was opened again and given nothing new to play was never seen to have run
+out, because its picture decoder, fed next to nothing, answered the end of
+its stream with a change of format and was never asked again. The player then
+made no request and said nothing, for as long as it was left.
+
+With this the call goes on looking until MediaCodec gives a picture or
+signals the end, and takes a decoder that has done neither for two seconds
+as ended. The cost: that call can take two seconds where it took one, with a
+decoder that never signals the end of its stream.
+
+--- a/libavcodec/mediacodecdec.c
++++ b/libavcodec/mediacodecdec.c
+@@ -31,6 +31,7 @@
+ #include "libavutil/opt.h"
+ #include "libavutil/intreadwrite.h"
+ #include "libavutil/pixfmt.h"
++#include "libavutil/time.h"
+ #include "libavutil/internal.h"
+ 
+ #include "avcodec.h"
+@@ -484,6 +485,33 @@
+     }
+ 
+     return ret;
++}
++
++/* Once the end of the stream has been queued the caller has nothing more to
++ * send, so "try again" is no answer to give it: it would wait for a picture
++ * that it can do nothing to bring about. What MediaCodec says meanwhile that
++ * is neither a picture nor the end (its output format or its buffers have
++ * changed, or nothing came within the second it is waited for) is passed
++ * over here, and a decoder that has said neither for two seconds is taken
++ * to have ended: some never signal the end of a stream they were given
++ * little or nothing of. */
++static int mediacodec_receive_drained(AVCodecContext *avctx, MediaCodecH264DecContext *s,
++                                      AVFrame *frame)
++{
++    int64_t began = av_gettime_relative();
++    int ret;
++
++    for (;;) {
++        ret = ff_mediacodec_dec_receive(avctx, s->ctx, frame, true);
++        if (ret != AVERROR(EAGAIN) || !s->ctx->draining)
++            return ret;
++        if (av_gettime_relative() - began >= 2000000) {
++            av_log(avctx, AV_LOG_WARNING,
++                   "MediaCodec has not signalled the end of its stream for two seconds: taken as ended\n");
++            s->ctx->eos = 1;
++            return AVERROR_EOF;
++        }
++    }
+ }
+ 
+ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+@@ -574,7 +602,7 @@
+             ret = ff_mediacodec_dec_send(avctx, s->ctx, &null_pkt, true);
+             if (ret < 0)
+                 return ret;
+-            return ff_mediacodec_dec_receive(avctx, s->ctx, frame, true);
++            return mediacodec_receive_drained(avctx, s, frame);
+         } else if (ret == AVERROR(EAGAIN) && s->ctx->current_input_buffer < 0) {
+             return ff_mediacodec_dec_receive(avctx, s->ctx, frame, true);
+         } else if (ret < 0) {
