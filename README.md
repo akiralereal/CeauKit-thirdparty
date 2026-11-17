@@ -177,9 +177,18 @@ the commit whose patches, build scripts and build information are those of
 the libraries in that version. It is made when that version is released, is
 never moved, and stays as long as that version is distributed.
 
-No version of Ceau that contains these libraries has been released yet, and
-this repository has no tags; Ceau 3.0.0 will be the first. The `main` branch
-holds what the current development builds of CeauKit are made from.
+| Version of Ceau | Tag | Released |
+| --- | --- | --- |
+| 3.0.0 (build 25) | [`ceau-3.0.0`](https://github.com/akiralereal/CeauKit-thirdparty/tree/ceau-3.0.0) | November 2026 |
+
+To build the libraries of a released version, check out its tag:
+
+```bash
+git checkout ceau-3.0.0
+```
+
+The `main` branch holds what the current development builds of CeauKit are
+made from, and can be ahead of the latest tag.
 
 ## Questions
 
