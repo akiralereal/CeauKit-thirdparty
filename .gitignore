@@ -7,3 +7,7 @@ Vendor/
 # The Android build: the sources laid out for it and what it builds.
 android/work/
 android/build/
+
+# The Windows build: the sources laid out for it and what it builds.
+windows/work/
+windows/build/

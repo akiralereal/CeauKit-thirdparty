@@ -1,0 +1,131 @@
+tls (SChannel): TLS 1.3 where Windows speaks it
+
+FFmpeg's SChannel asks Windows for credentials in the older form
+(SCHANNEL_CRED), with which SChannel goes no further than TLS 1.2,
+whatever the system allows. A server that speaks only TLS 1.3 could not
+be reached: the handshake failed, and came out with the code for no
+version agreed on (0002). Windows 11 and Windows Server 2022 (build
+20348) speak TLS 1.3 as clients when given the newer form
+(SCH_CREDENTIALS); Windows 10 does not, in either form.
+
+So a client over TLS (not DTLS, and no server) asks for the newer form
+there, with the flags it had and no restriction of its own on the
+versions: the ones Windows' settings allow are offered, TLS 1.3 and 1.2
+on Windows 11 as it comes. Everything else is as it was: SChannel still
+judges no certificate, the client judges it itself (0003), and
+revocation is still read from Windows' cache alone. Where Windows turns
+the newer form down, and on every Windows 10, the client gets the older
+form as before, so asking never costs a connection, and Windows 10 runs
+the code it ran. The build is asked of ntdll (RtlGetVersion), whose
+answer does not depend on the program's manifest. curl draws the line
+at the same build.
+
+TLS 1.3 also reaches a place in reading that TLS 1.2 seldom did. A TLS
+1.3 server sends session tickets right after the handshake, OpenSSL two
+at once, and SChannel's DecryptMessage returns SEC_I_RENEGOTIATE for
+each: it is a handshake message after the handshake. FFmpeg's reader
+then refused to go on whenever more had been received than that one
+message ("Cannot renegotiate, encrypted data buffer not empty"), which
+after the first of two tickets is always so, and the first read of
+every TLS 1.3 connection failed. Microsoft's DecryptMessage (Schannel)
+says to hand SChannel what is left, as the token of the next
+InitializeSecurityContext, which tls_handshake_loop does with what is at
+the head of the buffer; curl does the same. The refusal is gone.
+
+Held to the TLS checklist of docs/Engine-Libs.md in the Windows 11
+ARM64 virtual machine, ARM64 and x64; Windows 10 itself was not run
+there.
+
+--- a/libavformat/tls_schannel.c
++++ b/libavformat/tls_schannel.c
+@@ -34,7 +34,11 @@
+ #include "tls.h"
+ 
+ #define SECURITY_WIN32
++/* SCH_CREDENTIALS, the form of credentials TLS 1.3 takes, is declared only
++ * with this, and is made of UNICODE_STRINGs, which subauth.h declares. */
++#define SCHANNEL_USE_BLACKLISTS
+ #include <windows.h>
++#include <subauth.h>
+ #include <security.h>
+ #include <schnlsp.h>
+ #include <sddl.h>
+@@ -1342,6 +1346,24 @@
+     return ret;
+ }
+ 
++/* Whether this Windows speaks TLS 1.3 as a client: Windows 11 and Windows
++ * Server 2022 (build 20348) and later do, given credentials in the newer
++ * form (SCH_CREDENTIALS); Windows 10 does not. The build is asked of ntdll,
++ * whose answer, unlike GetVersionEx's and VerifyVersionInfo's, does not
++ * depend on the program's manifest. */
++static int tls_windows_speaks_tls13(void)
++{
++    typedef LONG (WINAPI *get_version_function)(OSVERSIONINFOW *);
++    OSVERSIONINFOW version = { .dwOSVersionInfoSize = sizeof(version) };
++    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
++    get_version_function get_version =
++        ntdll ? (get_version_function)(void *)GetProcAddress(ntdll, "RtlGetVersion") : NULL;
++
++    return get_version && get_version(&version) == 0 &&
++           (version.dwMajorVersion > 10 ||
++            (version.dwMajorVersion == 10 && version.dwBuildNumber >= 20348));
++}
++
+ static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **options)
+ {
+     TLSContext *c = h->priv_data;
+@@ -1399,10 +1421,29 @@
+     }
+ 
+     /* Get credential handle */
+-    sspi_ret = AcquireCredentialsHandle(NULL, (TCHAR *)UNISP_NAME,
+-                                        s->listen ? SECPKG_CRED_INBOUND : SECPKG_CRED_OUTBOUND,
+-                                        NULL, &schannel_cred, NULL, NULL, &c->cred_handle,
+-                                        &c->cred_timestamp);
++    /* With credentials in the older form SChannel goes no further than
++     * TLS 1.2, and a server that speaks only TLS 1.3 cannot be reached. A
++     * client over TLS therefore asks for the newer form where Windows speaks
++     * TLS 1.3, with the same flags and the versions Windows' own settings
++     * allow (on Windows 11, TLS 1.3 and 1.2). A Windows that turns the newer
++     * form down, and every Windows 10, get the older form, as before. */
++    sspi_ret = SEC_E_UNSUPPORTED_FUNCTION;
++    if (!s->listen && !s->is_dtls && tls_windows_speaks_tls13()) {
++        SCH_CREDENTIALS credentials = { 0 };
++
++        credentials.dwVersion = SCH_CREDENTIALS_VERSION;
++        credentials.dwFlags   = schannel_cred.dwFlags;
++        sspi_ret = AcquireCredentialsHandle(NULL, (TCHAR *)UNISP_NAME, SECPKG_CRED_OUTBOUND,
++                                            NULL, &credentials, NULL, NULL, &c->cred_handle,
++                                            &c->cred_timestamp);
++        if (sspi_ret != SEC_E_OK)
++            av_log(h, AV_LOG_VERBOSE, "No credentials of the newer form (0x%lx): TLS 1.2 at most\n", sspi_ret);
++    }
++    if (sspi_ret != SEC_E_OK)
++        sspi_ret = AcquireCredentialsHandle(NULL, (TCHAR *)UNISP_NAME,
++                                            s->listen ? SECPKG_CRED_INBOUND : SECPKG_CRED_OUTBOUND,
++                                            NULL, &schannel_cred, NULL, NULL, &c->cred_handle,
++                                            &c->cred_timestamp);
+     if (sspi_ret != SEC_E_OK) {
+         av_log(h, AV_LOG_ERROR, "Unable to acquire security credentials (0x%lx)\n", sspi_ret);
+         ret = AVERROR_UNKNOWN;
+@@ -1546,12 +1587,13 @@
+                 c->enc_buf_offset = 0;
+ 
+             if (sspi_ret == SEC_I_RENEGOTIATE) {
+-                if (c->enc_buf_offset) {
+-                    av_log(h, AV_LOG_ERROR, "Cannot renegotiate, encrypted data buffer not empty\n");
+-                    ret = AVERROR_UNKNOWN;
+-                    goto cleanup;
+-                }
+-
++                /* A handshake message after the handshake: under TLS 1.2 a
++                 * server asking for a new handshake, under TLS 1.3 a session
++                 * ticket or a new key, which servers send right after the
++                 * handshake, often two at once. SChannel takes it in the
++                 * handshake, with what came after it (as Microsoft's
++                 * DecryptMessage (Schannel) says), and that is what is left
++                 * at the head of enc_buf, which tls_handshake_loop hands it. */
+                 av_log(h, AV_LOG_VERBOSE, "Re-negotiating security context\n");
+                 ret = tls_handshake_loop(h, 0);
+                 if (ret < 0) {

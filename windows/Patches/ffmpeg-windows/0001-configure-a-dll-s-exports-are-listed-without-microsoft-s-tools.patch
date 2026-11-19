@@ -1,0 +1,29 @@
+configure (win32): the list of what a DLL exports is made without Microsoft's own tools
+
+A DLL built for Microsoft's ABI exports what its .def file names, and
+compat/windows/makedef writes that file from the objects: it puts them
+in an archive and reads the archive's symbols. For MinGW the script is
+handed the archiver and the nm that configure was given; for the
+Microsoft toolchain it is handed neither, and falls back on lib.exe and
+dumpbin.exe.
+
+Ceau's libraries for Windows are compiled on a Mac, with clang-cl and
+lld-link from LLVM, where there is no lib.exe: the link of the first
+DLL stopped at "Could not create temporary library". Where lib.exe is
+not there, the script is now handed the archiver and the nm that were
+named (--ar, --nm: llvm-ar and llvm-nm), as it is for MinGW. Where it
+is there, nothing changes.
+
+--- a/configure	2026-11-19 00:55:10
++++ b/configure	2026-11-19 00:55:10
+@@ -6286,6 +6286,10 @@
+         SLIBNAME_WITH_VERSION='$(SLIBPREF)$(FULLNAME)-$(LIBVERSION)$(SLIBSUF)'
+         SLIBNAME_WITH_MAJOR='$(SLIBPREF)$(FULLNAME)-$(LIBMAJOR)$(SLIBSUF)'
+         SLIB_CREATE_DEF_CMD='LDFLAGS="$(LDFLAGS)" EXTERN_PREFIX="$(EXTERN_PREFIX)" $(SRC_PATH)/compat/windows/makedef $(SUBDIR)lib$(NAME).ver $(SLIB_CREATE_DEF_INPUTS) > $$(@:$(SLIBSUF)=.def)'
++        # Without lib.exe, the archiver and the nm that were named make the
++        # list of what a DLL exports, as they do for MinGW.
++        test_cmd lib.exe -list ||
++            SLIB_CREATE_DEF_CMD='LDFLAGS="$(LDFLAGS)" EXTERN_PREFIX="$(EXTERN_PREFIX)" AR="$(AR_CMD)" NM="$(NM_CMD)" $(SRC_PATH)/compat/windows/makedef $(SUBDIR)lib$(NAME).ver $(SLIB_CREATE_DEF_INPUTS) > $$(@:$(SLIBSUF)=.def)'
+         SLIB_INSTALL_NAME='$(SLIBNAME_WITH_MAJOR)'
+         SLIB_INSTALL_LINKS=
+         SLIB_INSTALL_EXTRA_SHLIB='$(SLIBNAME:$(SLIBSUF)=.lib)'

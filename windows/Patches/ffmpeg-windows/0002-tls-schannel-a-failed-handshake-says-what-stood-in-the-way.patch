@@ -1,0 +1,151 @@
+tls (SChannel): a handshake that fails says which of two things stood in the way
+
+Windows' FFmpeg makes its secure connections with SChannel, where Apple's
+makes them with Secure Transport and Android's with OpenSSL. CeauKit's
+Patches/ffmpeg/0008 has every handshake Secure Transport fails over one
+of two things come out with a code of its own, and the engine reads the
+two codes to tell its host why a source would not open. This is the same
+for SChannel, with the same two codes, so that the engine reads them the
+same on Windows.
+
+The two things are: the server's certificate is not trusted (nothing
+vouches for it but itself, as on most media servers on a home network;
+or it has run out, or is for another name), and no version of TLS, or
+no cipher, could be agreed on with the server. Every other failure is
+what it was.
+
+libavutil has a code for neither, so the two are spelled out here and by
+whoever reads them: FFERRTAG(0xF8,'C','R','T') and FFERRTAG(0xF8,'T','L',
+'S').
+
+SChannel names its reason in the status its call returns, and the
+status alone does not tell the two apart. When the peer ends the
+handshake with an alert, the status is made from the alert and says
+less than it: handshake_failure comes out as an illegal message, which
+a garbled one does too, and a peer that turns down a certificate of
+this side's comes out with the statuses SChannel has for a certificate
+of the peer's that it turned down itself. So an alert, where the peer
+sent one, is read where it lies (in the clear, at the head of what was
+received), and is the reason: handshake_failure, protocol_version and
+insufficient_security are the three that say no version or no cipher
+could be agreed on, which are the ones Secure Transport's
+errSSLPeerHandshakeFail, errSSLPeerProtocolVersion and
+errSSLPeerInsufficientSecurity stand for. Without an alert the status
+is SChannel's own finding: a certificate it turned down, or nothing it
+speaks among what the peer offered.
+
+This is code that decides what a failed secure connection is called,
+written on a Mac and compiled for Windows. It has not run.
+
+--- a/libavformat/tls_schannel.c	2026-11-19 01:09:12
++++ b/libavformat/tls_schannel.c	2026-11-19 01:09:12
+@@ -678,6 +678,84 @@
+ #else
+     return AVERROR(ENOSYS);
+ #endif
++}
++
++/* The alert a peer ended a handshake with, when what it sent last is one, or
++ * -1. Until a handshake is through an alert is sent in the clear: a record
++ * of two bytes, how grave it is and which it is. (DTLS's records are laid
++ * out differently, and are not looked at.) */
++static int tls_peer_alert(const TLSContext *c)
++{
++    const uint8_t *record = c->enc_buf;
++
++    if (c->tls_shared.is_dtls || !record || c->enc_buf_offset < 7)
++        return -1;
++    if (record[0] != 21 || record[1] != 3 || record[3] != 0 || record[4] != 2)
++        return -1;
++    return record[6];
++}
++
++/* What stood in the way of a handshake, told apart for a caller that has
++ * something different to do about each: a certificate that is not trusted
++ * (nothing vouches for it but itself, as on most media servers on a home
++ * network; or it has run out, or is for another name), and a peer with
++ * which no version of TLS, or no cipher, could be agreed on. Neither has a
++ * code in libavutil. These are the two that Secure Transport gives for
++ * them in CeauKit's build (its Patches/ffmpeg/0008), so that whoever reads
++ * them reads them the same whichever library made the connection:
++ * FFERRTAG(0xF8,'C','R','T') and FFERRTAG(0xF8,'T','L','S'). 0 for any
++ * other failure.
++ *
++ * `status` is what SChannel said, `alert` the alert the peer ended the
++ * handshake with, or -1. */
++static int tls_handshake_error(SECURITY_STATUS status, int alert)
++{
++    /* The peer gave up on the handshake and said why. Three of its reasons
++     * are that no version or no cipher suits it: handshake_failure,
++     * protocol_version and insufficient_security. SChannel's status is made
++     * from the alert and says less: it calls the first an illegal message,
++     * as it calls one that is garbled, and it has the same statuses for a
++     * peer that turns down a certificate of this side's as for a
++     * certificate of the peer's that it turned down itself. So where there
++     * is an alert, the alert is what is read. */
++    if (alert >= 0)
++        return alert == 40 || alert == 70 || alert == 71 ? FFERRTAG(0xF8, 'T', 'L', 'S') : 0;
++
++    switch (status) {
++    /* A certificate of the peer's that SChannel judged and turned down: as
++     * SChannel names the reason, and as the checks beneath it do. */
++    case SEC_E_UNTRUSTED_ROOT:
++    case SEC_E_CERT_UNKNOWN:
++    case SEC_E_CERT_EXPIRED:
++    case SEC_E_WRONG_PRINCIPAL:
++    case CERT_E_UNTRUSTEDROOT:
++    case CERT_E_UNTRUSTEDTESTROOT:
++    case CERT_E_UNTRUSTEDCA:
++    case CERT_E_CHAINING:
++    case CERT_E_EXPIRED:
++    case CERT_E_VALIDITYPERIODNESTING:
++    case CERT_E_CN_NO_MATCH:
++    case CERT_E_INVALID_NAME:
++    case CERT_E_WRONG_USAGE:
++    case CERT_E_PURPOSE:
++    case CERT_E_ROLE:
++    case CERT_E_CRITICAL:
++    case CERT_E_INVALID_POLICY:
++    case CERT_E_REVOKED:
++    case CERT_E_REVOCATION_FAILURE:
++    case CRYPT_E_REVOKED:
++    case CRYPT_E_NO_REVOCATION_CHECK:
++    case CRYPT_E_REVOCATION_OFFLINE:
++    case TRUST_E_CERT_SIGNATURE:
++    case TRUST_E_BASIC_CONSTRAINTS:
++        return FFERRTAG(0xF8, 'C', 'R', 'T');
++    /* No version both sides speak, or no cipher both sides take, among
++     * what the peer offered or chose. */
++    case SEC_E_UNSUPPORTED_FUNCTION:
++    case SEC_E_ALGORITHM_MISMATCH:
++        return FFERRTAG(0xF8, 'T', 'L', 'S');
++    }
++    return 0;
+ }
+ 
+ static void init_sec_buffer(SecBuffer *buffer, unsigned long type,
+@@ -953,11 +1031,12 @@
+                 }
+             }
+         } else {
++            int cause = tls_handshake_error(sspi_ret, tls_peer_alert(c));
+             if (sspi_ret == SEC_E_WRONG_PRINCIPAL)
+                 av_log(h, AV_LOG_ERROR, "SNI or certificate check failed\n");
+             else
+                 av_log(h, AV_LOG_ERROR, "Creating security context failed (0x%lx)\n", sspi_ret);
+-            ret = AVERROR_UNKNOWN;
++            ret = cause ? cause : AVERROR_UNKNOWN;
+             goto fail;
+         }
+ 
+@@ -1035,8 +1114,9 @@
+                                          NULL, 0, &c->ctxt_handle, &outbuf_desc, &c->context_flags,
+                                          &c->ctxt_timestamp);
+     if (sspi_ret != SEC_I_CONTINUE_NEEDED) {
++        int cause = tls_handshake_error(sspi_ret, -1);
+         av_log(h, AV_LOG_ERROR, "Unable to create initial security context (0x%lx)\n", sspi_ret);
+-        ret = AVERROR_UNKNOWN;
++        ret = cause ? cause : AVERROR_UNKNOWN;
+         goto fail;
+     }
+ 

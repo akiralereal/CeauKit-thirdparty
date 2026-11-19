@@ -1,0 +1,16 @@
+Ceau for Windows: the engine's DLLs, one set for each architecture (x86_64 and aarch64, Windows' x64 and ARM64), for Windows 10 and later, carried by the app's installer beside CeauWindows.dll
+FFmpeg 9.0.2, source SHA-256 8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e: avutil-61.dll swresample-7.dll swscale-10.dll avcodec-63.dll avformat-63.dll avfilter-12.dll
+dav1d 1.5.4, source SHA-256 686616b7c69eb88d44459391ab25cac13b6647a3b288835c5784e71c1514a5c5: linked into avcodec-63.dll
+libxml2 2.15.4, source SHA-256 98087fd181d9070724f3fbc65c7377db03038eb92bd882374daff44940138821: linked into avformat-63.dll, for the DASH reader: its parser, its tree and its threads
+zlib 1.4, source SHA-256 02dd159783677a749c04adbdd02b55b8a2bcc7e054f51b76b549199a916ad584: linked into avcodec-63.dll, avformat-63.dll and ass.dll
+win-iconv 0.0.8, source SHA-256 23adea990a8303c6e69e32a64a30171efcb1b73824a1c2da1bbf576b0ae7c520: linked into avcodec-63.dll and avformat-63.dll
+libass 0.17.5, source SHA-256 2dca25c0e0c837ddf00b52011b3f82cac1e4ddd3ad018227806b0c2288864acc: ass.dll, with FreeType and HarfBuzz linked into it, and the system's fonts through DirectWrite
+FreeType 2.15.0, source SHA-256 93cd47eb719c325107f2d3cf087d06299e944c3b48a40b55537302304dea1dd5
+HarfBuzz 15.1.0, source SHA-256 0fc7c565443a5f4be7da65ac5ee5bd737d9b158dc908708b7689a0a5796b0c8d
+FriBidi 1.0.18, source SHA-256 1de5e8073d035388b71d0b2d452b1da1f8caeea8a7702997b401fe1b6250727f: fribidi-0.dll, a library of its own that ass.dll names
+Patches: ffmpeg/0001-0018 (as on Apple's systems) and windows/ffmpeg-windows/0001-0004; freetype/0001-0002 and windows/freetype-windows/0001; libass/0001
+FFmpeg is configured without --enable-gpl and without --enable-nonfree, with --enable-schannel --enable-d3d11va --enable-w32threads --enable-zlib --enable-iconv --enable-libdav1d --enable-libxml2; every option is in windows/Scripts/build-engine-libs.sh
+Licences: LGPL version 2.1 or later (FFmpeg, FriBidi), BSD 2-Clause (dav1d), MIT (libxml2, HarfBuzz), zlib (zlib), public domain (win-iconv), ISC (libass), FTL (FreeType)
+Built on a Mac for Microsoft's ABI (x86_64-pc-windows-msvc, aarch64-pc-windows-msvc) with swift.org's toolchain 6.4.2 (Apple clang 21.0.0, as clang-cl with lld-link), Visual C 14.44.17.14 and the Windows SDK 10.0.26100 as xwin lays them out, NASM 3.02, Meson 1.12.1 and Ninja 1.13.2; on the Universal CRT, with Visual C's part of the runtime linked into each DLL; each DLL has a PDB beside it, which does not ship
+Build script: windows/Scripts/build-engine-libs.sh, a copy of the one in the app's repository as of 2026-11-19 (commit db706b9); windows/Scripts/prepare-sources.sh lays this repository's archives and patches out for it
+Checked 2026-11-19: aarch64 built again from this repository alone gives the same eight DLLs as the ones the app carries, exporting and importing the same symbols; seven are the same byte for byte but for 20 bytes each (the number -Brepro writes in place of a date, and the identity of the PDB), and ass.dll has the same instructions, one for one, laid out at other addresses, because HarfBuzz's assertion messages in it carry the path of the folder it was compiled in; x86_64 was not built again

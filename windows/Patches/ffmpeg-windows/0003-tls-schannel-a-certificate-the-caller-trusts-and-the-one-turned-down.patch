@@ -1,0 +1,278 @@
+tls (SChannel): a certificate the caller trusts by itself, and which one was turned down
+
+What CeauKit's Patches/ffmpeg/0012 does for Secure Transport, for
+SChannel, with the same option and the same entry, so that the engine
+asks and is told the same on Windows.
+
+A media server on a home network shows a certificate nothing vouches
+for but itself. The handshake fails, as it should for a stranger. A
+person who has been shown that certificate and said "this is my server"
+has no way to be heard: the choices were to verify every certificate
+against the system's roots or to verify none.
+
+With the `trusted_cert_sha256` option a caller names one certificate by
+the SHA-256 of it as it is sent, in hexadecimal, colons or not. A peer
+that shows exactly that certificate is taken as it is, whatever else is
+the matter with it (no root, run out, written for another name): the
+peer holds its key, and that certificate is what was trusted. Any other
+certificate is judged against the system's roots and the name, so a
+server with a certificate the system does trust still connects, and a
+different one that nothing vouches for is still turned down.
+
+So that a caller can ask somebody whether to trust a certificate at
+all, a handshake that fails over the certificate says which one it was:
+the same digest, as `refused_cert_sha256` among the options the caller
+gets back from the opening that failed.
+
+To do either, a client that verifies no longer has SChannel judge the
+server's certificate inside the handshake (SCH_CRED_AUTO_CRED_
+VALIDATION), where the certificate cannot be looked at first and a
+refusal names none. It judges it itself, when a handshake is through
+and before anything of the caller's is sent, and again after every
+handshake a server asks for later: the certificate the caller trusts is
+taken there, and any other is handed to what Windows judges a server's
+certificate with (CertGetCertificateChain, then
+CertVerifyCertificateChainPolicy with the rules for a TLS server and
+the name asked for). A certificate turned down there is a failed
+handshake with the code for it, FFERRTAG(0xF8,'C','R','T').
+
+One thing is not as SChannel had it. SChannel was told to check every
+certificate of the chain for revocation and to fail when that could not
+be learned, which asks the certificate authority's server over the
+network during the handshake. Secure Transport and OpenSSL as Ceau
+builds them wait for no such server, and a source that opens on an
+iPhone has to open on a PC whose network does not reach it. Here
+revocation is read from what Windows already has cached, a certificate
+known to be revoked is turned down, and one whose state is not known is
+not.
+
+This is code that decides which servers are trusted, written on a Mac
+and compiled for Windows. It has not run. What its first run on Windows
+has to show is in docs/Engine-Libs.md.
+
+--- a/libavformat/tls_schannel.c	2026-11-19 01:09:12
++++ b/libavformat/tls_schannel.c	2026-11-19 01:09:12
+@@ -23,7 +23,9 @@
+ #include "config.h"
+ #include "config_components.h"
+ 
++#include "libavutil/avstring.h"
+ #include "libavutil/mem.h"
++#include "libavutil/sha.h"
+ #include "avformat.h"
+ #include "internal.h"
+ #include "network.h"
+@@ -619,6 +621,9 @@
+     int connected;
+     int connection_closed;
+     int sspi_close_notify;
++
++    char *trusted_cert_sha256;
++    char refused_cert_sha256[65];
+ } TLSContext;
+ 
+ int ff_tls_set_external_socket(URLContext *h, URLContext *sock)
+@@ -757,7 +762,144 @@
+     }
+     return 0;
+ }
++
++/* The SHA-256 of a certificate as it was sent: what a person compares two
++ * certificates by. Written as 64 lower-case hexadecimal digits. */
++static int cert_sha256(PCCERT_CONTEXT cert, char hex[65])
++{
++    struct AVSHA *sha;
++    uint8_t digest[32];
++
++    if (!cert || !cert->pbCertEncoded || !cert->cbCertEncoded)
++        return AVERROR_UNKNOWN;
++    if (!(sha = av_sha_alloc()))
++        return AVERROR(ENOMEM);
++    av_sha_init(sha, 256);
++    av_sha_update(sha, cert->pbCertEncoded, cert->cbCertEncoded);
++    av_sha_final(sha, digest);
++    av_free(sha);
++    ff_data_to_hex(hex, digest, sizeof(digest), 1);
++    return 0;
++}
++
++/* Whether a digest as a caller wrote it, in either case and with or without
++ * colons between its bytes, is the one in `hex`. */
++static int is_sha256(const char *stated, const char *hex)
++{
++    for (; *stated; stated++) {
++        if (*stated == ':' || *stated == ' ')
++            continue;
++        if (!*hex || av_tolower(*stated) != *hex)
++            return 0;
++        hex++;
++    }
++    return !*hex;
++}
++
++/* Judges the certificate a server showed, in SChannel's place, when a
++ * handshake is through and before anything is sent or read over it. The
++ * certificate the caller said it trusts (`trusted_cert_sha256`) is taken as
++ * it is: whatever else is the matter with it (no root, run out, written for
++ * another name), the peer that shows it holds its key, and that certificate
++ * is what was trusted. Any other is judged as Windows judges a server's:
++ * its chain is built to a root the system trusts, and held against the
++ * rules for a TLS server and against the name that was asked for. One that
++ * is turned down is kept, so that the caller can be told which it was.
++ *
++ * Whether a certificate of the chain has been revoked is read from what
++ * Windows already knows and is not asked of the network: a handshake does
++ * not wait for a certificate authority's server, and does not fail because
++ * one cannot be reached. A certificate known to be revoked is turned down.
++ *
++ * 0, or FFERRTAG(0xF8,'C','R','T') for a certificate that is not trusted. */
++static int tls_verify_server(URLContext *h)
++{
++    static const char *const usages[] = {
++        szOID_PKIX_KP_SERVER_AUTH, szOID_SERVER_GATED_CRYPTO, szOID_SGC_NETSCAPE,
++    };
++    TLSContext *c = h->priv_data;
++    TLSShared *s = &c->tls_shared;
++    PCCERT_CONTEXT cert = NULL;
++    PCCERT_CHAIN_CONTEXT chain = NULL;
++    CERT_CHAIN_PARA chain_para = { 0 };
++    SSL_EXTRA_CERT_CHAIN_POLICY_PARA ssl_para = { 0 };
++    CERT_CHAIN_POLICY_PARA policy_para = { 0 };
++    CERT_CHAIN_POLICY_STATUS policy_status = { 0 };
++    SECURITY_STATUS sspi_ret;
++    wchar_t *host = NULL;
++    char shown[65] = "";
++    int ret = FFERRTAG(0xF8, 'C', 'R', 'T');
+ 
++    sspi_ret = QueryContextAttributes(&c->ctxt_handle, SECPKG_ATTR_REMOTE_CERT_CONTEXT, &cert);
++    if (sspi_ret != SEC_E_OK || !cert) {
++        av_log(h, AV_LOG_ERROR, "The peer showed no certificate (0x%lx)\n", sspi_ret);
++        cert = NULL;
++        goto end;
++    }
++
++    if (cert_sha256(cert, shown) < 0)
++        shown[0] = 0;
++    if (c->trusted_cert_sha256 && shown[0] && is_sha256(c->trusted_cert_sha256, shown)) {
++        ret = 0;
++        goto end;
++    }
++
++    /* The chain, from the certificate the server showed for itself and the
++     * ones it sent along (which are in that certificate's store), to a root
++     * of the system's. */
++    chain_para.cbSize = sizeof(chain_para);
++    chain_para.RequestedUsage.dwType = USAGE_MATCH_TYPE_OR;
++    chain_para.RequestedUsage.Usage.cUsageIdentifier = FF_ARRAY_ELEMS(usages);
++    chain_para.RequestedUsage.Usage.rgpszUsageIdentifier = (LPSTR *)usages;
++    if (!CertGetCertificateChain(NULL, cert, NULL, cert->hCertStore, &chain_para,
++                                 CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT |
++                                 CERT_CHAIN_REVOCATION_CHECK_CACHE_ONLY,
++                                 NULL, &chain)) {
++        av_log(h, AV_LOG_ERROR, "No chain could be built for the peer's certificate (0x%lx)\n", GetLastError());
++        chain = NULL;
++        goto refused;
++    }
++
++    /* The rules for a TLS server, and the name. Without a name to hold the
++     * certificate against there is none to check, as SChannel has it too. */
++    if (s->host) {
++        int length = MultiByteToWideChar(CP_UTF8, 0, s->host, -1, NULL, 0);
++        host = length > 0 ? av_calloc(length, sizeof(*host)) : NULL;
++        if (!host) {
++            ret = AVERROR(ENOMEM);
++            goto end;
++        }
++        MultiByteToWideChar(CP_UTF8, 0, s->host, -1, host, length);
++    }
++    ssl_para.cbSize = sizeof(ssl_para);
++    ssl_para.dwAuthType = AUTHTYPE_SERVER;
++    ssl_para.pwszServerName = host;
++    policy_para.cbSize = sizeof(policy_para);
++    policy_para.dwFlags = CERT_CHAIN_POLICY_IGNORE_ALL_REV_UNKNOWN_FLAGS;
++    policy_para.pvExtraPolicyPara = &ssl_para;
++    policy_status.cbSize = sizeof(policy_status);
++    if (!CertVerifyCertificateChainPolicy(CERT_CHAIN_POLICY_SSL, chain, &policy_para, &policy_status)) {
++        av_log(h, AV_LOG_ERROR, "The peer's certificate could not be judged (0x%lx)\n", GetLastError());
++        goto refused;
++    }
++    if (policy_status.dwError) {
++        av_log(h, AV_LOG_ERROR, "The peer's certificate is not trusted (0x%lx)\n", policy_status.dwError);
++        goto refused;
++    }
++    ret = 0;
++    goto end;
++
++refused:
++    av_strlcpy(c->refused_cert_sha256, shown, sizeof(c->refused_cert_sha256));
++end:
++    av_free(host);
++    if (chain)
++        CertFreeCertificateChain(chain);
++    if (cert)
++        CertFreeCertificateContext(cert);
++    return ret;
++}
++
+ static void init_sec_buffer(SecBuffer *buffer, unsigned long type,
+                             void *data, unsigned long size)
+ {
+@@ -1073,6 +1215,17 @@
+     }
+ 
+     av_log(h, AV_LOG_TRACE, "Handshake completed\n");
++
++    /* A client judges the certificate the server showed itself: that is
++     * where a certificate the caller trusts by itself is known, and where
++     * one that is turned down can be named. It does so whenever a handshake
++     * ends, one the server asks for later included, and before anything of
++     * the caller's is sent. */
++    if (!s->listen && s->verify) {
++        ret = tls_verify_server(h);
++        if (ret < 0)
++            goto fail;
++    }
+ 
+     return 0;
+ 
+@@ -1232,13 +1385,12 @@
+             schannel_cred.grbitEnabledProtocols = SP_PROT_DTLS1_X_SERVER;
+ #endif
+     } else {
+-        if (s->verify)
+-            schannel_cred.dwFlags = SCH_CRED_AUTO_CRED_VALIDATION |
+-                                    SCH_CRED_REVOCATION_CHECK_CHAIN;
+-        else
+-            schannel_cred.dwFlags = SCH_CRED_MANUAL_CRED_VALIDATION |
+-                                    SCH_CRED_IGNORE_NO_REVOCATION_CHECK |
+-                                    SCH_CRED_IGNORE_REVOCATION_OFFLINE;
++        /* SChannel is not asked to judge the server's certificate. A client
++         * that verifies does so itself when the handshake is through
++         * (tls_verify_server); one that does not, does not. */
++        schannel_cred.dwFlags = SCH_CRED_MANUAL_CRED_VALIDATION |
++                                SCH_CRED_IGNORE_NO_REVOCATION_CHECK |
++                                SCH_CRED_IGNORE_REVOCATION_OFFLINE;
+ 
+ #if CONFIG_DTLS_PROTOCOL
+         if (s->is_dtls)
+@@ -1259,6 +1411,11 @@
+ 
+     if (!s->external_sock) {
+         ret = tls_handshake(h);
++        /* Which certificate it was that is turned down, for a caller that
++         * means to ask somebody whether to trust it: left among the options
++         * it gets back. */
++        if (ret == FFERRTAG(0xF8, 'C', 'R', 'T') && c->refused_cert_sha256[0] && options)
++            av_dict_set(options, "refused_cert_sha256", c->refused_cert_sha256, 0);
+         if (ret < 0)
+             goto fail;
+     }
+@@ -1533,6 +1690,8 @@
+                             OFFSET(cert_store_subject), AV_OPT_TYPE_STRING, .flags = TLS_OPTFL },
+     { "cert_store_name",    "Name of the specific cert store to search in (for cert_store_subject)",
+                             OFFSET(cert_store_name), AV_OPT_TYPE_STRING, { .str = "MY" }, .flags = TLS_OPTFL },
++    { "trusted_cert_sha256", "Take the peer's certificate as it is when this is its SHA-256, in hexadecimal",
++                            OFFSET(trusted_cert_sha256), AV_OPT_TYPE_STRING, .flags = TLS_OPTFL },
+     { NULL }
+ };
+ 

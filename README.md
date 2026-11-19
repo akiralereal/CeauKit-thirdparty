@@ -5,7 +5,8 @@ seven open-source libraries, three of them with changes. This repository holds
 what those builds are made from: the patches, the build scripts, the licence
 texts, and every upstream source archive, with its address and checksum. Ceau
 for Android builds the same libraries, less two, with OpenSSL and changes of
-its own: see [Android](#android).
+its own: see [Android](#android). Ceau for Windows builds all seven, with zlib,
+win-iconv and changes of its own: see [Windows](#windows).
 
 CeauKit itself is not in this repository.
 
@@ -46,6 +47,7 @@ The full list of configure options is in
 | `dist/` | The upstream source archives the builds were made from, as they were downloaded: one `.tar.xz` per library. |
 | `SHA256SUMS` | The SHA-256 of each upstream archive. |
 | `android/` | What Ceau for Android adds: its patches and its build scripts (see [Android](#android)). |
+| `windows/` | What Ceau for Windows adds: its patches and its build scripts (see [Windows](#windows)). |
 
 ## The patches
 
@@ -168,6 +170,8 @@ library:
 | `LICENSES/FriBidi.txt` | FriBidi | GNU Lesser General Public License, version 2.1 |
 | `LICENSES/libxml2.txt` | libxml2 | MIT |
 | `LICENSES/OpenSSL.txt` | OpenSSL (Android only) | Apache License 2.0 |
+| `LICENSES/zlib.txt` | zlib (Windows only) | zlib License |
+| `LICENSES/win-iconv.txt` | win-iconv (Windows only) | Public domain |
 
 Each patch in `Patches/` is offered under the licence of the library it
 changes.
@@ -217,6 +221,75 @@ the second is a copy of the script the app is built with, and writes each
 ABI's libraries to `android/build/android/<abi>/install/lib`. What was used
 for the current build is in [BUILD-INFO/Android.txt](BUILD-INFO/Android.txt).
 
+## Windows
+
+Ceau for Windows packs, for each architecture it ships (x64 and ARM64, which
+the build calls `x86_64` and `aarch64`), these DLLs: `avutil-61.dll`, `swresample-7.dll`, `swscale-10.dll`,
+`avcodec-63.dll`, `avformat-63.dll` and `avfilter-12.dll` (FFmpeg, with dav1d
+linked into `avcodec-63.dll` and libxml2 into `avformat-63.dll`), `ass.dll`
+(libass, with FreeType and HarfBuzz linked into it) and `fribidi-0.dll`
+(FriBidi, a library of its own, so that it can be exchanged like FFmpeg's).
+They are built from the same archives as above with the same patches, and
+these differences:
+
+- **zlib 1.4 and win-iconv 0.0.8**, which Apple's systems and Android bring
+  themselves and Windows does not. zlib is linked into `avcodec-63.dll`,
+  `avformat-63.dll` and `ass.dll`, win-iconv (an iconv made of the
+  conversions Windows has) into `avcodec-63.dll` and `avformat-63.dll`.
+  Their archives are in `dist/`, as the build fetches them
+  ([zlib-1.4.tar.gz](https://zlib.net/fossils/zlib-1.4.tar.gz) from zlib.net,
+  and win-iconv's tag `v0.0.8` as
+  [GitHub packs it](https://github.com/win-iconv/win-iconv/archive/refs/tags/v0.0.8.tar.gz)),
+  with their checksums in `SHA256SUMS`; their licences are in
+  `LICENSES/zlib.txt` and `LICENSES/win-iconv.txt`.
+- **SChannel**, the TLS of Windows, takes the place of Secure Transport for
+  https (`--enable-schannel`), and **D3D11VA** is FFmpeg's hardware decoder
+  there (`--enable-d3d11va`), with Windows' threads; VideoToolbox,
+  AudioToolbox, Secure Transport and bzip2 are left out.
+- **libass finds the system's fonts through DirectWrite.**
+- **Patches of Windows' own**, in `windows/Patches/`, applied after the ones
+  above:
+
+| Patch | What it changes |
+| --- | --- |
+| `ffmpeg-windows/0001-configure-a-dll-s-exports-are-listed-without-microsoft-s-tools` | The list of what a DLL exports is made without Microsoft's own tools: where there is no `lib.exe`, with the archiver and the nm that were named. Build only. |
+| `ffmpeg-windows/0002-tls-schannel-a-failed-handshake-says-what-stood-in-the-way` | A handshake that fails says which of two things stood in the way (patch 0008 above, for SChannel). |
+| `ffmpeg-windows/0003-tls-schannel-a-certificate-the-caller-trusts-and-the-one-turned-down` | A certificate the caller trusts by itself, and which one was turned down (patch 0012 above, for SChannel); revocation is read from what Windows has cached. |
+| `ffmpeg-windows/0004-tls-schannel-tls-1-3-where-windows-speaks-it` | TLS 1.3 where Windows speaks it (Windows 11 and Windows Server 2022), TLS 1.2 as before on Windows 10. |
+| `freetype-windows/0001-meson-a-static-library-needs-no-resource-compiler` | A static library is built without a resource compiler. Build only. |
+
+The DLLs are built on a Mac, for Microsoft's ABI, with swift.org's toolchain
+for the Mac (6.4.2: its `clang-cl`, `lld-link`, `llvm-ar`, `llvm-nm` and
+`llvm-objdump`), Microsoft's C runtime and Windows SDK as
+[xwin](https://github.com/Jake-Shadle/xwin) lays them out, nasm, meson,
+ninja, pkg-config and Xcode's command line tools. Fetching Microsoft's C
+runtime and SDK is accepting the licence of Microsoft's build tools, which
+is for the person who fetches them to accept:
+
+```bash
+xwin --arch x86_64,aarch64 splat --use-winsysroot-style --preserve-ms-arch-notation \
+    --disable-symlinks --output ~/Library/Developer/CeauKitWindowsCheck/winsysroot
+```
+
+To build them again from this repository:
+
+```bash
+windows/Scripts/prepare-sources.sh
+CEAUKIT_DIR="$PWD/windows/work/CeauKit" CEAU_WINDOWS_TOOLCHAIN=<the toolchain's usr/bin> \
+    windows/Scripts/build-engine-libs.sh x86_64 aarch64
+```
+
+The first lays `dist/` and `Patches/` out as the Windows build reads them;
+the second is a copy of the script the app is built with (in the app's
+repository, which is not public, as of its commit `db706b9` of 19 November
+2026), and writes each architecture's DLLs to
+`windows/build/windows/<arch>/install/bin`. `CEAU_WINDOWS_SYSROOT` names
+the folder xwin wrote, if it is not the one above. Where the script's
+messages send the reader to CeauKit's scripts, `prepare-sources.sh` stands
+in for them, and the paragraph above for the tools. What was used for the
+current build is in
+[BUILD-INFO/Windows.txt](BUILD-INFO/Windows.txt).
+
 ## Releases and tags
 
 Each version of Ceau that ships with these libraries gets a tag here, named
@@ -231,7 +304,9 @@ never moved, and stays as long as that version is distributed.
 | 3.0.0 (build 25) | [`ceau-3.0.0`](https://github.com/akiralereal/CeauKit-thirdparty/tree/ceau-3.0.0) | November 2026 |
 
 Each version of Ceau for Android gets a tag of its own the same way, named
-`ceau-android-` and its version number. None has been released yet.
+`ceau-android-` and its version number, and each version of Ceau for Windows
+one named `ceau-windows-` and its version number. None of either has been
+released yet.
 
 To build the libraries of a released version, check out its tag:
 

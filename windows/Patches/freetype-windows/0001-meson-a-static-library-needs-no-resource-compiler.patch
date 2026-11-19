@@ -1,0 +1,34 @@
+meson (Windows): a static library is built without a resource compiler
+
+For Windows, FreeType's meson.build compiles a version resource
+(src/base/ftver.rc) into the library, whatever kind of library it is,
+and meson stops when it finds no resource compiler.
+
+A version resource is what Explorer shows of a DLL. A static library
+has none: its objects go into somebody else's DLL, which has a version
+of its own. Ceau's FreeType for Windows is such a library (it is linked
+into ass.dll), and it is compiled on a Mac with the swift.org toolchain,
+which brings no resource compiler. The resource is now compiled only
+when a DLL is built.
+
+--- a/meson.build	2026-11-19 00:55:42
++++ b/meson.build	2026-11-19 00:55:42
+@@ -238,11 +238,13 @@
+ 
+ ft2_sources += 'src/dlg/dlgwrap.c'
+ if host_machine.system() == 'windows'
+-  winmod = import('windows')
+-  ft2_sources += [
+-    'builds/windows/ftdebug.c',
+-    winmod.compile_resources('src/base/ftver.rc'),
+-  ]
++  ft2_sources += 'builds/windows/ftdebug.c'
++  # The version resource is a DLL's. A static library carries none, and so
++  # needs no resource compiler to be built.
++  if get_option('default_library') != 'static'
++    winmod = import('windows')
++    ft2_sources += winmod.compile_resources('src/base/ftver.rc')
++  endif
+ else
+   ft2_sources += 'src/base/ftdebug.c'
+ endif
