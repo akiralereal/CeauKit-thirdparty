@@ -399,6 +399,11 @@ compile() {
     # whoever has such a file needs no key of their own. No app of these plays
     # audiobooks; the owner had it left out (2026-11-16, docs/Shipping.md).
     local unwanted_readers=(--disable-demuxer=aa)
+    # Audio Vivid, the sound of China's 4K and 8K channels, which FFmpeg 9.0.2
+    # has no decoder for: Patches/ffmpeg/0019 brings one, with the parser
+    # that cuts its stream into frames. Both are named, so that a build
+    # without them stops rather than plays those channels silent.
+    local wanted_decoders=(--enable-decoder=avs3a --enable-parser=avs3a)
 
     # --enable-debug is FFmpeg's -g, which changes no code: it is what the
     # dSYM is made of, and the binary that ships is stripped of it.
@@ -418,6 +423,7 @@ compile() {
         ${picture_decoders[@]+"${picture_decoders[@]}"}
         ${manifest_readers[@]+"${manifest_readers[@]}"}
         "${unwanted_readers[@]}"
+        "${wanted_decoders[@]}"
         --disable-filters
         --enable-filter=bwdif,yadif,scale,format,null,anull,aresample,aformat,volume,acompressor,dynaudnorm,loudnorm
         ${extra[@]+"${extra[@]}"}
@@ -477,6 +483,8 @@ compile() {
         || die "$triple was configured with the IMF reader"
     grep -q '^#define CONFIG_AA_DEMUXER 0' config_components.h \
         || die "$triple was configured with Audible's .aa reader"
+    grep -q '^#define CONFIG_AVS3A_DECODER 1' config_components.h && grep -q '^#define CONFIG_AVS3A_PARSER 1' config_components.h \
+        || die "$triple was configured without Audio Vivid's decoder and parser"
     # The hand-written code is what makes software decoding quick enough to
     # watch. A build that was meant to have it and has not is not a build.
     if [[ "$arch" == arm64 ]]; then

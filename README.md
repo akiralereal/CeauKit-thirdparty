@@ -19,7 +19,7 @@ watch plays sound alone.
 
 | Library | Version | Licence | Patches | Upstream archive | SHA-256 of the archive |
 | --- | --- | --- | --- | --- | --- |
-| FFmpeg | 9.0.2 | LGPL 2.1 or later | 18 | [ffmpeg-9.0.2.tar.xz](https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz) | `8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e` |
+| FFmpeg | 9.0.2 | LGPL 2.1 or later | 19 | [ffmpeg-9.0.2.tar.xz](https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz) | `8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e` |
 | dav1d | 1.5.4 | BSD 2-Clause | 0 | [dav1d-1.5.4.tar.xz](https://downloads.videolan.org/pub/videolan/dav1d/1.5.4/dav1d-1.5.4.tar.xz) | `686616b7c69eb88d44459391ab25cac13b6647a3b288835c5784e71c1514a5c5` |
 | libass | 0.17.5 | ISC | 1 | [libass-0.17.5.tar.xz](https://github.com/libass/libass/releases/download/0.17.5/libass-0.17.5.tar.xz) | `2dca25c0e0c837ddf00b52011b3f82cac1e4ddd3ad018227806b0c2288864acc` |
 | FreeType | 2.15.0 | FreeType License (FTL) | 2 | [freetype-2.15.0.tar.xz](https://download.savannah.gnu.org/releases/freetype/freetype-2.15.0.tar.xz) | `93cd47eb719c325107f2d3cf087d06299e944c3b48a40b55537302304dea1dd5` |
@@ -77,6 +77,7 @@ of each file says what it changes and why.
 | `0016-dash-a-live-segment-not-there-yet-is-waited-for` | DASH: a live segment that is listed but not yet there is waited for rather than skipped. |
 | `0017-hls-subtitles-in-playlists-of-their-own` | HLS: a subtitle rendition's playlist is fetched when its stream is first wanted, not at the opening. Its WebVTT cues are placed by `X-TIMESTAMP-MAP` (new WebVTT option `timestamp_map`). New HLS option `subtitles_from` starts a newly wanted playlist at the time shown. A cue still up at a seek is kept, and a failed subtitle segment or playlist costs only its subtitles. |
 | `0018-hls-a-reader-at-the-end-of-a-live-playlist-keeps-its-pace` | HLS: a reader that has read all of a live playlist sleeps until its reload is due, not up to 100 ms past it, and counts the next reload from the time this one was due, not from when its answer came in, so it no longer falls behind the playlist with every segment. |
+| `0019-avs3a-audio-vivid-decoded` | Audio Vivid (AVS3-P3) is decoded: the decoder, parser and readers by Peter Ross in FFmpeg's pull request [25207](https://code.ffmpeg.org/FFmpeg/FFmpeg/pulls/25207), at its head of 2026-11-20, carried to 9.0.2. It was not merged into FFmpeg when it was taken, and its file says what was changed to carry it. |
 
 ### FreeType 2.15.0
 
@@ -184,7 +185,8 @@ x86_64), these shared libraries: `libavutil.so`, `libswresample.so`,
 (FFmpeg), `libass.so` (libass, with FreeType and HarfBuzz linked into it) and
 `libfribidi.so` (FriBidi, a library of its own, so that it can be exchanged
 like FFmpeg's). They are built from the same archives as above with the same
-patches, and these differences:
+patches (`0019` from the first build after 2026-11-23; which ones the
+current build has is in `BUILD-INFO/Android.txt`), and these differences:
 
 - **OpenSSL 3.5.9** takes the place of Secure Transport for https, linked
   into `libavformat.so`. Its archive is in `dist/`, its licence in
@@ -229,8 +231,9 @@ the build calls `x86_64` and `aarch64`), these DLLs: `avutil-61.dll`, `swresampl
 linked into `avcodec-63.dll` and libxml2 into `avformat-63.dll`), `ass.dll`
 (libass, with FreeType and HarfBuzz linked into it) and `fribidi-0.dll`
 (FriBidi, a library of its own, so that it can be exchanged like FFmpeg's).
-They are built from the same archives as above with the same patches, and
-these differences:
+They are built from the same archives as above with the same patches
+(`0019` from the first build after 2026-11-23; which ones the current build
+has is in `BUILD-INFO/Windows.txt`), and these differences:
 
 - **zlib 1.4 and win-iconv 0.0.8**, which Apple's systems and Android bring
   themselves and Windows does not. zlib is linked into `avcodec-63.dll`,
