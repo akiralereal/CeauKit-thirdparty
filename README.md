@@ -209,6 +209,7 @@ current build has is in `BUILD-INFO/Android.txt`), and these differences:
 | `ffmpeg-android/0006-mediacodec-a-decoder-that-is-draining-says-a-picture-or-the-end` | A decoder that is draining says a picture or the end. |
 | `ffmpeg-android/0007-mediacodec-a-buffer-let-go-of-after-its-decoder-closed-logs-with-no-context` | A buffer let go of after its decoder closed logs with no context (a crash once its context was freed). |
 | `libass-android/0001-fontselect-android-s-fonts-for-the-letters-no-other-font-has` | A font provider of Android's: a letter the chosen font lacks is drawn in the system's font that has it. |
+| `libass-android/0002-fontselect-android-s-list-of-its-fonts-where-it-has-no-font-matcher` | On Android 9, which has no font matcher, the provider goes by the system's own list of its fonts (`/system/etc/fonts.xml`). |
 
 To build them again from this repository, with the Android NDK (r30), python3
 and, for x86_64, nasm:

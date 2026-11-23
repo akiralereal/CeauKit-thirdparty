@@ -1,0 +1,711 @@
+fontselect: Android's list of its fonts where it has no font matcher
+
+Android's provider found a letter's font by asking AFontMatcher, which came
+with Android 10 (API 29). Built for Android 9, libass could not call it at
+all, and a library built for 10 does not load on 9.
+
+On Android 9 the provider now goes by the list the system's own text stack
+is set up from, /system/etc/fonts.xml (libass/ass_android_fonts.c, which
+has nothing of libass or Android in it and is checked on the Mac by
+Scripts/check-native.sh): the default family, then the families the system
+falls back on, in the list's order, the first whose font has the letter.
+Of a script's two families the one made for running text is taken, as the
+matcher is asked for it, and a family's bold is listed with it where it is
+a file of its own. That is the text stack's order less its weighing of the
+reader's languages, which decides between the Chinese, Japanese and Korean
+forms of a Han character and nothing else; Han characters are the default
+font's, which the application chose for the reader, and never reach the
+provider.
+
+A font found is kept open, as the matcher's are; one that lacks the letter
+is closed again, since a face is the whole file mapped and a list has some
+two hundred families. A letter no font has is looked for in every file
+once, and remembered.
+
+On Android 10 and later nothing changes: AFontMatcher is asked as before.
+Its functions are weak references now (__ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__),
+null on Android 9, and every call of them stands behind a check of the
+system's version, which the compiler holds the file to
+(-Werror=unguarded-availability in the build script).
+
+--- a/libass/ass.h
++++ b/libass/ass.h
+@@ -220,7 +220,7 @@
+  * DIRECTWRITE force a DirectWrite based font provider (Microsoft Win32 only)
+  * FONTCONFIG force a Fontconfig based font provider
+  * ANDROID force Android's fonts, for the letters no other font has
+- *         (Android 10 and later; an addition of Ceau's build for Android)
++ *         (Android 9 and later; an addition of Ceau's build for Android)
+  *
+  * libass uses the best shaper available by default.
+  */
+--- a/libass/ass_android.c
++++ b/libass/ass_android.c
+@@ -27,6 +27,17 @@
+  * as it opens any font file: read through FreeType as it is needed, never
+  * whole into memory.
+  *
++ * Android 9 (API 28) has no AFontMatcher, and nothing else that says which
++ * font a letter is drawn in. There the provider goes by the list the text
++ * stack itself is set up from, /system/etc/fonts.xml (ass_android_fonts.c):
++ * the default family and then the families the system falls back on, in
++ * the list's order, the first that has the letter. That is the text
++ * stack's own order less its weighing of the reader's languages, which
++ * matters for Han characters alone, and those are the host's default font's
++ * to draw. The library is built for Android 9, so AFontMatcher's functions
++ * are weak references here, null where the system has none, and each call
++ * of them stands behind a check of the system's version.
++ *
+  * It does nothing else. Android lists its fonts (ASystemFontIterator) but
+  * not what they are called, and its matcher knows only its own family
+  * names (sans-serif, serif, and aliases such as Arial for sans-serif), so a
+@@ -51,6 +62,12 @@
+  * a regular one made bold.
+  */
+ 
++// Before any header of the system's: with this, what Android has only from
++// a later version than the one this is built for is declared, as a weak
++// reference, and the compiler refuses a call of it that no check of the
++// version stands before (-Wunguarded-availability).
++#define __ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__ 1
++
+ #include "config.h"
+ #include "ass_compat.h"
+ 
+@@ -67,6 +84,7 @@
+ #include FT_FREETYPE_H
+ 
+ #include "ass_android.h"
++#include "ass_android_fonts.h"
+ #include "ass_font.h"
+ #include "ass_utils.h"
+ 
+@@ -81,6 +99,22 @@
+  * falls through to this one anyway. */
+ #define SYSTEM_FAMILY "sans-serif"
+ 
++/* AFontMatcher and AFont came with Android 10. A function marked with this
++ * may call them, and is itself called behind a check of the version. */
++#define FONT_MATCHER_API 29
++#define NEEDS_FONT_MATCHER __attribute__((availability(android, introduced = FONT_MATCHER_API)))
++
++/* Where Android 9 keeps the list of its fonts, and the fonts. */
++#define SYSTEM_FONT_LIST "/system/etc/fonts.xml"
++#define SYSTEM_FONT_FOLDER "/system/fonts"
++
++/* What is known of a family of the system's list. */
++enum {
++    FAMILY_UNTRIED = 0,     // not listed with libass: opened to be asked for a letter, and closed
++    FAMILY_LISTED,          // listed with libass, its face kept open among the fonts
++    FAMILY_UNUSABLE,        // its file cannot be opened
++};
++
+ typedef struct {
+     FT_Face face;   // the font's, for asking which letters it has
+ } AndroidFontData;
+@@ -96,7 +130,9 @@
+     ASS_Library *library;
+     FT_Library ftlibrary;
+     ASS_FontProvider *provider;
+-    AFontMatcher *matcher;
++    AFontMatcher *matcher;      // Android 10 and later; NULL before
++    ASS_AndroidFontList *list;  // Android 9: the system's own list of its fonts
++    unsigned char *list_state;  // FAMILY_... of each family of the list
+ 
+     AndroidFont *fonts;
+     int n_fonts;
+@@ -141,8 +177,12 @@
+     for (int i = 0; i < android->n_families; i++)
+         free(android->families[i]);
+     free(android->families);
+-    if (android->matcher)
+-        AFontMatcher_destroy(android->matcher);
++    if (__builtin_available(android FONT_MATCHER_API, *)) {
++        if (android->matcher)
++            AFontMatcher_destroy(android->matcher);
++    }
++    ass_android_font_list_free(android->list);
++    free(android->list_state);
+     free(android);
+ }
+ 
+@@ -188,15 +228,14 @@
+ }
+ 
+ /*
+- * Lists the font AFontMatcher answered with under the family, with libass
+- * and here. The font is opened to be asked which letters it has, and kept
+- * open for that: the face is FreeType's view of the file, which reads it
+- * as it is asked. Returns the font's place here, or -1.
++ * Lists a font of the system's under the family, with libass and here. The
++ * font is opened to be asked which letters it has, and kept open for that:
++ * the face is FreeType's view of the file, which reads it as it is asked.
++ * Returns the font's place here, or -1.
+  */
+-static int add_font(AndroidProvider *android, AFont *found, int family)
++static int add_font(AndroidProvider *android, const char *path, int index,
++                    int weight, bool italic, int family)
+ {
+-    const char *path = AFont_getFontFilePath(found);
+-    int index = (int) AFont_getCollectionIndex(found);
+     if (!path || !*path)
+         return -1;
+     FT_Face face = ass_face_open(android->library, android->ftlibrary, path, NULL, index);
+@@ -229,8 +268,8 @@
+         .families = &name,
+         .n_family = 1,
+         .extended_family = name,
+-        .weight = AFont_getWeight(found),
+-        .style_flags = AFont_isItalic(found) ? FT_STYLE_FLAG_ITALIC : 0,
++        .weight = weight,
++        .style_flags = italic ? FT_STYLE_FLAG_ITALIC : 0,
+     };
+     // On failure libass has destroyed the font's data itself.
+     if (!ass_font_provider_add_font(android->provider, &meta, path, index, data)) {
+@@ -247,13 +286,22 @@
+     return android->n_fonts++;
+ }
+ 
++/* The font AFontMatcher answered with, listed under the family. */
++NEEDS_FONT_MATCHER
++static int add_matched_font(AndroidProvider *android, AFont *found, int family)
++{
++    return add_font(android, AFont_getFontFilePath(found), (int) AFont_getCollectionIndex(found),
++                    AFont_getWeight(found), AFont_isItalic(found), family);
++}
++
+ /*
+  * The family of the system's font for the letter: the font Android's text
+  * stack draws it in, and the bold of that font where it has a file of its
+  * own. -1 when that font does not have the letter either: AFontMatcher
+  * answers with some font whatever the letter, so that a box is drawn.
+  */
+-static int family_for(AndroidProvider *android, uint32_t letter)
++NEEDS_FONT_MATCHER
++static int family_from_matcher(AndroidProvider *android, uint32_t letter)
+ {
+     uint16_t text[2];
+     uint32_t length = utf16(letter, text);
+@@ -264,13 +312,13 @@
+     int known = path ? known_font(android, path, (int) AFont_getCollectionIndex(regular)) : -1;
+     if (known < 0) {
+         int family = new_family(android);
+-        known = family < 0 ? -1 : add_font(android, regular, family);
++        known = family < 0 ? -1 : add_matched_font(android, regular, family);
+         if (known >= 0) {
+             AFontMatcher_setStyle(android->matcher, AFONT_WEIGHT_BOLD, false);
+             AFont *bold = AFontMatcher_match(android->matcher, SYSTEM_FAMILY, text, length, NULL);
+             const char *bold_path = AFont_getFontFilePath(bold);
+             if (bold_path && known_font(android, bold_path, (int) AFont_getCollectionIndex(bold)) < 0)
+-                add_font(android, bold, family);
++                add_matched_font(android, bold, family);
+             AFont_close(bold);
+         }
+     }
+@@ -278,8 +326,65 @@
+     if (known < 0 || !has_letter(android->fonts[known].data->face, letter))
+         return -1;
+     return android->fonts[known].family;
++}
++
++/*
++ * The same from the system's list of its fonts, where there is no matcher
++ * to ask: the family of the first font that has the letter, among the fonts
++ * found for earlier letters and then down the list. -1 when none has it.
++ *
++ * A font found is kept open, as the matcher's are. One that lacks the
++ * letter is closed again: a list has some two hundred families, and a face
++ * is the whole file mapped, which a 32-bit process has no room to keep two
++ * hundred of. So a letter no font has costs a look into every file once,
++ * and is remembered (get_fallback); the letters of a script are found in
++ * the font its first letter was found in, without a look into any file.
++ */
++static int family_from_list(AndroidProvider *android, uint32_t letter)
++{
++    for (int i = 0; i < android->n_fonts; i++)
++        if (has_letter(android->fonts[i].data->face, letter))
++            return android->fonts[i].family;
++    if (!android->list)
++        return -1;
++    for (int i = 0; i < android->list->n_families; i++) {
++        if (android->list_state[i] != FAMILY_UNTRIED)
++            continue;
++        const ASS_AndroidFontFamily *listed = &android->list->families[i];
++        FT_Face face = NULL;
++        // Not ass_face_open: a list may name a file the device does not
++        // have, and that is nothing to warn of for every letter.
++        if (FT_New_Face(android->ftlibrary, listed->path, listed->index, &face)) {
++            android->list_state[i] = FAMILY_UNUSABLE;
++            continue;
++        }
++        ass_charmap_magic(android->library, face);
++        bool has = has_letter(face, letter);
++        FT_Done_Face(face);
++        if (!has)
++            continue;
++        int family = new_family(android);
++        int known = family < 0 ? -1
++            : add_font(android, listed->path, listed->index, 400, false, family);
++        android->list_state[i] = known < 0 ? FAMILY_UNUSABLE : FAMILY_LISTED;
++        if (known < 0)
++            continue;
++        if (listed->bold_path)
++            add_font(android, listed->bold_path, listed->bold_index, 700, false, family);
++        return family;
++    }
++    return -1;
+ }
+ 
++static int family_for(AndroidProvider *android, uint32_t letter)
++{
++    if (__builtin_available(android FONT_MATCHER_API, *)) {
++        if (android->matcher)
++            return family_from_matcher(android, letter);
++    }
++    return family_from_list(android, letter);
++}
++
+ static char *get_fallback(void *data, ASS_Library *lib, const char *family,
+                           uint32_t codepoint)
+ {
+@@ -317,15 +422,28 @@
+         return NULL;
+     android->library = lib;
+     android->ftlibrary = ftlib;
+-    android->matcher = AFontMatcher_create();
+-    // The fonts made for running text rather than for a compact interface:
+-    // Noto Sans Thai and not Noto Sans Thai UI, whose marks are squeezed
+-    // into a Latin line's height.
+-    AFontMatcher_setFamilyVariant(android->matcher, AFAMILY_VARIANT_ELEGANT);
++    if (__builtin_available(android FONT_MATCHER_API, *)) {
++        android->matcher = AFontMatcher_create();
++        // The fonts made for running text rather than for a compact
++        // interface: Noto Sans Thai and not Noto Sans Thai UI, whose marks
++        // are squeezed into a Latin line's height.
++        AFontMatcher_setFamilyVariant(android->matcher, AFAMILY_VARIANT_ELEGANT);
++    } else {
++        // The same choice is made of the list's families where it is read.
++        android->list = ass_android_font_list_read(SYSTEM_FONT_LIST, SYSTEM_FONT_FOLDER);
++        if (android->list)
++            android->list_state = calloc(FFMAX(1, android->list->n_families), 1);
++        if (!android->list_state) {
++            ass_android_font_list_free(android->list);
++            android->list = NULL;
++        }
++        ass_msg(lib, MSGL_INFO, "android: no font matcher before Android 10, %d families of %s instead",
++                android->list ? android->list->n_families : 0, SYSTEM_FONT_LIST);
++    }
+     android->provider = ass_font_provider_new(selector, &android_callbacks, android);
+     if (!android->provider) {
+-        AFontMatcher_destroy(android->matcher);
+-        free(android);
++        // Frees the matcher and the list as it frees the rest.
++        destroy_provider(android);
+         return NULL;
+     }
+     return android->provider;
+--- a/libass/ass_android_fonts.c
++++ b/libass/ass_android_fonts.c
+@@ -0,0 +1,337 @@
++/*
++ * This file is part of libass, as Ceau builds it for Android.
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++/*
++ * Android's own list of its fonts, /system/etc/fonts.xml, as far as a
++ * letter's font is found from it (ass_android_fonts.h).
++ *
++ * The list is XML of one plain shape, which every Android since 5 has had:
++ *
++ *   <familyset>
++ *     <family name="sans-serif">                  the default family, first
++ *       <font weight="400" style="normal">Roboto-Regular.ttf</font> ...
++ *     </family>
++ *     <family name="serif"> ... </family>         families asked for by name
++ *     <family lang="und-Arab" variant="elegant">  families fallen back on:
++ *       <font weight="400" style="normal">NotoNaskhArabic-Regular.ttf</font>
++ *       <font weight="700" style="normal">NotoNaskhArabic-Bold.ttf</font>
++ *     </family>                                   no name, tried in order
++ *     <family lang="zh-Hans">
++ *       <font weight="400" style="normal" index="2">NotoSansCJK-Regular.ttc</font>
++ *       <font weight="400" style="normal" index="2" fallbackFor="serif">NotoSerifCJK-Regular.ttc</font>
++ *     </family>
++ *   </familyset>
++ *
++ * It is read by hand, tag by tag: libass has no XML reader, and one is not
++ * needed for this. A file a device's maker changed, or one cut short, gives
++ * the families that could be read and never a read beyond the text.
++ */
++
++#include "ass_android_fonts.h"
++
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++/* More than any list has (Android 15's has some 250), and the most that is
++ * read of a file that is not a list at all. */
++#define MAX_FAMILIES 1024
++#define MAX_FILE_SIZE (4 * 1024 * 1024)
++
++static bool is_space(char c)
++{
++    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
++}
++
++static bool is_name(char c)
++{
++    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
++        || c == '_' || c == '-' || c == ':' || c == '.';
++}
++
++/* The first place at or after `from` where `text` stands, or NULL. */
++static const char *find(const char *from, const char *end, const char *text)
++{
++    size_t length = strlen(text);
++    for (; from + length <= end; from++)
++        if (*from == text[0] && !memcmp(from, text, length))
++            return from;
++    return NULL;
++}
++
++/* The '>' that closes the tag whose text begins at `from`: one inside an
++ * attribute's quotes does not. NULL when the tag is not closed. */
++static const char *tag_end(const char *from, const char *end)
++{
++    char quote = 0;
++    for (; from < end; from++) {
++        if (quote) {
++            if (*from == quote)
++                quote = 0;
++        } else if (*from == '"' || *from == '\'') {
++            quote = *from;
++        } else if (*from == '>') {
++            return from;
++        }
++    }
++    return NULL;
++}
++
++/*
++ * The value of an attribute among those of a tag, `from` being where they
++ * begin and `end` the tag's '>'. Written to `value`, cut to what it holds.
++ * False when the tag has no such attribute.
++ */
++static bool attribute(const char *from, const char *end, const char *name,
++                      char *value, size_t value_size)
++{
++    size_t name_length = strlen(name);
++    while (from < end) {
++        while (from < end && !is_name(*from))
++            from++;
++        const char *start = from;
++        while (from < end && is_name(*from))
++            from++;
++        size_t length = (size_t) (from - start);
++        while (from < end && is_space(*from))
++            from++;
++        if (from >= end || *from != '=')
++            continue;   // a word with no value: not an attribute
++        from++;
++        while (from < end && is_space(*from))
++            from++;
++        if (from >= end || (*from != '"' && *from != '\''))
++            continue;
++        char quote = *from++;
++        const char *text = from;
++        while (from < end && *from != quote)
++            from++;
++        if (from >= end)
++            return false;
++        if (length == name_length && !memcmp(start, name, length)) {
++            size_t size = (size_t) (from - text);
++            if (size >= value_size)
++                size = value_size - 1;
++            memcpy(value, text, size);
++            value[size] = 0;
++            return true;
++        }
++        from++;
++    }
++    return false;
++}
++
++/* What a family has been found to hold while its fonts are read. */
++typedef struct {
++    char *path;
++    int index;
++    int distance;       // of the font's weight from the one looked for
++} Candidate;
++
++/* The font is the family's, unless one nearer the weight was met before. */
++static void take(Candidate *candidate, const char *path, int index, int distance)
++{
++    if (candidate->path && candidate->distance <= distance)
++        return;
++    char *copy = strdup(path);
++    if (!copy)
++        return;
++    free(candidate->path);
++    candidate->path = copy;
++    candidate->index = index;
++    candidate->distance = distance;
++}
++
++/*
++ * The text of a font element: the file's name, without the white space
++ * around it or the elements in it (<axis>, of a font that varies). `from`
++ * is after the font tag's '>' and `to` where "</font" begins.
++ */
++static char *font_file(const char *from, const char *to, const char *folder)
++{
++    size_t folder_length = strlen(folder);
++    char *path = malloc(folder_length + 1 + (size_t) (to - from) + 1);
++    if (!path)
++        return NULL;
++    char *name = path + folder_length + 1;
++    size_t length = 0;
++    bool inside = false;
++    for (; from < to; from++) {
++        if (*from == '<')
++            inside = true;
++        else if (*from == '>')
++            inside = false;
++        else if (!inside && !is_space(*from))
++            name[length++] = *from;
++    }
++    name[length] = 0;
++    if (!length) {
++        free(path);
++        return NULL;
++    }
++    if (name[0] == '/') {
++        // A file named with its whole path, which later lists allow.
++        memmove(path, name, length + 1);
++    } else {
++        memcpy(path, folder, folder_length);
++        path[folder_length] = '/';
++    }
++    return path;
++}
++
++ASS_AndroidFontList *ass_android_font_list_parse(const char *xml, size_t size,
++                                                 const char *folder)
++{
++    ASS_AndroidFontList *list = calloc(1, sizeof(*list));
++    if (!list)
++        return NULL;
++    int allocated = 0;
++    int seen = 0;               // families met, the ones passed over too
++    bool in_family = false;
++    bool passed_over = false;   // this family is not one a letter is looked for in
++    Candidate regular = {0}, bold = {0};
++
++    const char *end = xml + size;
++    const char *at = xml;
++    while (at < end) {
++        const char *open = memchr(at, '<', (size_t) (end - at));
++        if (!open)
++            break;
++        at = open + 1;
++        if (end - at >= 3 && !memcmp(at, "!--", 3)) {
++            const char *close = find(at + 3, end, "-->");
++            if (!close)
++                break;
++            at = close + 3;
++            continue;
++        }
++        const char *close = tag_end(at, end);
++        if (!close)
++            break;
++        const char *word = at;
++        while (at < close && (is_name(*at) || *at == '/'))
++            at++;
++        size_t word_length = (size_t) (at - word);
++        // `at` is where the tag's attributes begin.
++
++        if (word_length == 6 && !memcmp(word, "family", 6)) {
++            char value[64];
++            in_family = close[-1] != '/';
++            // The first family is the default one whatever it is called. A
++            // later family with a name is drawn in only when a style asks
++            // for it by that name, which libass never asks of Android. Of
++            // a script's two families the one made for running text is
++            // kept, and the one squeezed for an interface passed over.
++            passed_over = (seen > 0 && attribute(at, close, "name", value, sizeof(value)))
++                || (attribute(at, close, "variant", value, sizeof(value)) && !strcmp(value, "compact"));
++            seen++;
++            free(regular.path);
++            free(bold.path);
++            regular = (Candidate) {0};
++            bold = (Candidate) {0};
++        } else if (word_length == 7 && !memcmp(word, "/family", 7)) {
++            if (in_family && !passed_over && regular.path && list->n_families < MAX_FAMILIES) {
++                if (list->n_families >= allocated) {
++                    int wanted = allocated ? 2 * allocated : 64;
++                    ASS_AndroidFontFamily *families =
++                        realloc(list->families, (size_t) wanted * sizeof(*families));
++                    if (!families)
++                        break;
++                    list->families = families;
++                    allocated = wanted;
++                }
++                ASS_AndroidFontFamily *family = &list->families[list->n_families++];
++                *family = (ASS_AndroidFontFamily) { .path = regular.path, .index = regular.index };
++                regular.path = NULL;
++                // A font that varies is every weight in one file: it has no
++                // bold of its own to open.
++                if (bold.path && (strcmp(bold.path, family->path) || bold.index != family->index)) {
++                    family->bold_path = bold.path;
++                    family->bold_index = bold.index;
++                    bold.path = NULL;
++                }
++            }
++            in_family = false;
++        } else if (word_length == 4 && !memcmp(word, "font", 4) && in_family && close[-1] != '/') {
++            const char *text = close + 1;
++            const char *text_end = find(text, end, "</font");
++            if (!text_end)
++                break;
++            char value[64];
++            int weight = attribute(at, close, "weight", value, sizeof(value)) ? atoi(value) : 400;
++            int index = attribute(at, close, "index", value, sizeof(value)) ? atoi(value) : 0;
++            bool upright = !attribute(at, close, "style", value, sizeof(value)) || !strcmp(value, "normal");
++            // A font named for another family (the serif one for Chinese)
++            // is not the one this family is drawn in.
++            bool another = attribute(at, close, "fallbackFor", value, sizeof(value));
++            char *path = (passed_over || !upright || another || index < 0)
++                ? NULL : font_file(text, text_end, folder);
++            if (path) {
++                take(&regular, path, index, abs(weight - 400));
++                if (weight >= 600)
++                    take(&bold, path, index, abs(weight - 700));
++                free(path);
++            }
++            close = text_end;
++        }
++        at = close + 1;
++    }
++    free(regular.path);
++    free(bold.path);
++    return list;
++}
++
++ASS_AndroidFontList *ass_android_font_list_read(const char *file,
++                                                const char *folder)
++{
++    FILE *stream = fopen(file, "rb");
++    if (!stream)
++        return NULL;
++    size_t size = 0, allocated = 64 * 1024;
++    char *text = malloc(allocated);
++    while (text) {
++        size += fread(text + size, 1, allocated - size, stream);
++        if (size < allocated || allocated >= MAX_FILE_SIZE)
++            break;
++        allocated *= 2;
++        char *more = realloc(text, allocated);
++        if (!more) {
++            free(text);
++            text = NULL;
++        } else {
++            text = more;
++        }
++    }
++    fclose(stream);
++    if (!text)
++        return NULL;
++    ASS_AndroidFontList *list = ass_android_font_list_parse(text, size, folder);
++    free(text);
++    return list;
++}
++
++void ass_android_font_list_free(ASS_AndroidFontList *list)
++{
++    if (!list)
++        return;
++    for (int i = 0; i < list->n_families; i++) {
++        free(list->families[i].path);
++        free(list->families[i].bold_path);
++    }
++    free(list->families);
++    free(list);
++}
+--- a/libass/ass_android_fonts.h
++++ b/libass/ass_android_fonts.h
+@@ -0,0 +1,62 @@
++/*
++ * This file is part of libass, as Ceau builds it for Android.
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++#ifndef LIBASS_ANDROID_FONTS_H
++#define LIBASS_ANDROID_FONTS_H
++
++#include <stddef.h>
++
++/*
++ * Android's own list of its fonts (/system/etc/fonts.xml), read for the
++ * fonts its text stack falls back on, in the order it tries them. This is
++ * what Android's provider goes by on Android 9, which has no font matcher
++ * to ask (ass_android.c).
++ *
++ * It has nothing of libass or of Android in it, so that it can be checked
++ * on any system.
++ */
++
++/* A family of the list: its upright font of regular weight, and its bold
++ * where that is a file or a face of its own. */
++typedef struct {
++    char *path;
++    int index;
++    char *bold_path;    // NULL: the family has no bold of its own
++    int bold_index;
++} ASS_AndroidFontFamily;
++
++typedef struct {
++    ASS_AndroidFontFamily *families;
++    int n_families;
++} ASS_AndroidFontList;
++
++/*
++ * The families a letter is looked for in, in the list's order: the first
++ * family of the list, which is the default one (sans-serif), and every
++ * family after it that has no name, which are the ones the system falls
++ * back on. Font files are named in the folder given. NULL when memory runs
++ * out; a text that is not such a list gives a list of no families.
++ */
++ASS_AndroidFontList *ass_android_font_list_parse(const char *xml, size_t size,
++                                                 const char *folder);
++
++/* The same of a file. NULL when it cannot be read too. */
++ASS_AndroidFontList *ass_android_font_list_read(const char *file,
++                                                const char *folder);
++
++void ass_android_font_list_free(ASS_AndroidFontList *list);
++
++#endif
