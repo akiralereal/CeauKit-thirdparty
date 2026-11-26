@@ -1,0 +1,95 @@
+mediacodec: a stalled decoder's two seconds are read off the clock
+
+0004 has mediacodec_receive_frame fail once MediaCodec has had no room for a
+packet and no picture to give for 250 rounds, and takes a round for the 8 ms
+it waits for a picture. It waits those 8 ms only once the decoder has given
+its first picture: before that ff_mediacodec_dec_receive does not wait at
+all, so that packets reach a starting decoder as fast as they can. There the
+250 rounds are over in some tens of milliseconds, before any decoder gives a
+picture, and a decoder whose input was merely full by then was taken for a
+stalled one. On the emulator a healthy H.264 decoder given a 4K broadcast
+failed so in two starts of five, 50 ms after it was started, with its first
+picture due at 80 to 150 ms.
+
+The call then fails and keeps the packet in hand. The engine goes on to the
+next packet, which avcodec_send_packet refuses with EAGAIN for as long as
+the kept one waits, and the engine does not send a refused packet again. So
+a decoder that is slow to start loses packets out of its first group of
+pictures, the more the slower it is, and a television's decoder given 4K is
+the slow one.
+
+With this the time is measured. It is two seconds once the decoder has given
+a picture, as it was meant. Before the first picture it is one second: a
+decoder that is starting has room again once it has decoded a picture, and a
+caller waiting on a decoder that will never give one, to close it or to put
+another in its place, is held one second and not two. A round sleeps a
+millisecond while the decoder has given no picture, since nothing else makes
+it wait there.
+
+Measured on the emulator (Ceau_Phone_API35, 4K broadcasts at 36 Mbit/s). A
+healthy decoder: no start fails (0 of 5, from 2 of 5), and the page plays
+133 to 215 ms after the decoder was started (163 to 304 before). A decoder
+that never gives a picture: FFmpeg's own takes its place 6.5 s after the
+start, as before. The cost is with that decoder alone: a change of channel
+away from it, before it is given up, shows the next channel 0.82 to 0.91 s
+after the tap, where it was 0.56 to 0.73 s.
+
+--- a/libavcodec/mediacodecdec.c
++++ b/libavcodec/mediacodecdec.c
+@@ -519,7 +519,7 @@
+     MediaCodecH264DecContext *s = avctx->priv_data;
+     int ret;
+     ssize_t index;
+-    int stalled = 0;
++    int64_t stalled_since = 0;
+ 
+     /* In delay_flush mode, wait until the user has released or rendered
+        all retained frames. */
+@@ -554,20 +554,41 @@
+                      * devices' decoders do exactly that with a stream they
+                      * should have refused, and the caller then never gets
+                      * to close the decoder, nor to see that it was asked
+-                     * to. Each round here waits for a picture for
+-                     * OUTPUT_DEQUEUE_TIMEOUT_US, 8 ms: after two seconds of
+-                     * them the call fails, and the packet in hand is kept
+-                     * for the next one. */
+-                    if (++stalled >= 250) {
++                     * to. After a while of that the call fails, and the
++                     * packet in hand is kept for the next one.
++                     *
++                     * The while is read off the clock. A round here waits
++                     * for a picture for OUTPUT_DEQUEUE_TIMEOUT_US only once
++                     * the decoder has given its first one, and not at all
++                     * before that, so rounds cannot be counted: 250 of them
++                     * were over some 25 ms after a decoder was started,
++                     * before any decoder gives a picture, and a decoder
++                     * that was merely full by then was taken for a stalled
++                     * one. It is two seconds once the decoder has given a
++                     * picture. Before its first it is one: a decoder that
++                     * is starting has room again within a picture's
++                     * decoding, and a caller is held no longer by one that
++                     * will never give a picture. A round sleeps a
++                     * millisecond there, where nothing else makes it wait. */
++                    int64_t now = av_gettime_relative();
++                    int64_t limit = s->ctx->output_buffer_count ? 2000000 : 1000000;
++
++                    if (!stalled_since) {
++                        stalled_since = now;
++                    } else if (now - stalled_since >= limit) {
+                         av_log(avctx, AV_LOG_WARNING,
+-                               "MediaCodec has taken no packet and given no picture for two seconds\n");
++                               "MediaCodec has taken no packet and given no picture for %d s\n",
++                               (int)(limit / 1000000));
+                         return AVERROR_EXTERNAL;
+                     }
++                    if (!s->ctx->output_buffer_count)
++                        av_usleep(1000);
+                     continue;
+                 }
+                 return ret;
+             }
+             s->ctx->current_input_buffer = index;
++            stalled_since = 0;
+         }
+ 
+         /* try to flush any buffered packet data */

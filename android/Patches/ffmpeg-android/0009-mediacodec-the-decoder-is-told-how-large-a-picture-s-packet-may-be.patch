@@ -1,0 +1,92 @@
+mediacodec: the decoder is told how large a picture's packet may be
+
+FFmpeg configures a MediaCodec video decoder with the stream's type, its
+size and its parameter sets, and says nothing of how large its packets are.
+The decoder then sizes its input buffers as it likes, and
+ff_mediacodec_dec_send cuts a packet larger than one buffer over several,
+with nothing to say that they are parts. A decoder that takes a whole
+picture from each buffer need not make a picture of the parts.
+
+Android's own players say it every time: ExoPlayer sets "max-input-size"
+from the size of the picture (MediaCodecVideoRenderer.getCodecMaxInputSize),
+and a decoder that wants larger buffers keeps its own figure. This sets the
+same figure for the codecs the engine sends to MediaCodec: a picture at 12
+bits a pixel, compressed no less than two to one (four to one for VP9), in
+whole macroblocks for H.264, and no less than 2 MB for HEVC. For a 4K
+broadcast that is 6.2 MB. Where the size of the picture is not known nothing
+is set, and a packet larger than the buffer is cut as before.
+
+Why now: a television plays its provider's 4K HEVC channels in an ExoPlayer
+app and shows them black, with their sound, here. This is one thing the two
+do differently when they open the same decoder. Whether it is what that
+television needs is not known: there is no log from it.
+
+On the emulator the key arrives and nothing else changes: its decoders want
+6 MiB whatever they are told ("client requested max input size 6220800,
+which is smaller than what component recommended (6291456); overriding"),
+and 4K H.264 plays in them as before.
+
+--- a/libavcodec/mediacodecdec.c
++++ b/libavcodec/mediacodecdec.c
+@@ -305,7 +305,48 @@
+     return ret;
+ }
+ #endif
++
++/* The most bytes one picture of the stream may come in, for MediaCodec's
++ * "max-input-size". A decoder told nothing sizes its input buffers as it
++ * likes, and a packet larger than one of them is cut over several
++ * (ff_mediacodec_dec_send), which a decoder that expects a whole picture in
++ * a buffer need not take. Reckoned as Android's own players reckon it
++ * (ExoPlayer's MediaCodecVideoRenderer.getCodecMaxInputSize): a picture at
++ * 12 bits a pixel, compressed no less than two to one (four for VP9), in
++ * whole macroblocks for H.264, and no less than 2 MB for HEVC. 0 where
++ * the size of the picture is not known, or the codec is one of the others:
++ * the decoder's own choice is left as it is. */
++static int mediacodec_max_input_size(const AVCodecContext *avctx)
++{
++    int64_t pixels, size;
++    int ratio = 2;
+ 
++    if (avctx->width <= 0 || avctx->height <= 0)
++        return 0;
++
++    pixels = (int64_t)avctx->width * avctx->height;
++    switch (avctx->codec_id) {
++    case AV_CODEC_ID_H264:
++        pixels = (int64_t)FFALIGN(avctx->width, 16) * FFALIGN(avctx->height, 16);
++        break;
++    case AV_CODEC_ID_HEVC:
++    case AV_CODEC_ID_VP8:
++    case AV_CODEC_ID_AV1:
++        break;
++    case AV_CODEC_ID_VP9:
++        ratio = 4;
++        break;
++    default:
++        return 0;
++    }
++
++    size = pixels * 3 / (2 * ratio);
++    if (avctx->codec_id == AV_CODEC_ID_HEVC)
++        size = FFMAX(size, 2 * 1024 * 1024);
++
++    return size > INT_MAX ? 0 : (int)size;
++}
++
+ static av_cold int mediacodec_decode_init(AVCodecContext *avctx)
+ {
+     int ret;
+@@ -433,8 +474,12 @@
+     ff_AMediaFormat_setString(format, "mime", codec_mime);
+ 
+     if (avctx->codec_type == AVMEDIA_TYPE_VIDEO) {
++        int max_input_size = mediacodec_max_input_size(avctx);
++
+         ff_AMediaFormat_setInt32(format, "width", avctx->width);
+         ff_AMediaFormat_setInt32(format, "height", avctx->height);
++        if (max_input_size > 0)
++            ff_AMediaFormat_setInt32(format, "max-input-size", max_input_size);
+     } else {
+         ff_AMediaFormat_setInt32(format, "channel-count", avctx->ch_layout.nb_channels);
+         ff_AMediaFormat_setInt32(format, "sample-rate", avctx->sample_rate);

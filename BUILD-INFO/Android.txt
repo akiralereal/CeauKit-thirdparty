@@ -4,11 +4,11 @@ OpenSSL 3.5.9, source SHA-256 603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb
 libass 0.17.5, source SHA-256 2dca25c0e0c837ddf00b52011b3f82cac1e4ddd3ad018227806b0c2288864acc: libass.so, with FreeType and HarfBuzz linked into it
 FreeType 2.15.0, source SHA-256 93cd47eb719c325107f2d3cf087d06299e944c3b48a40b55537302304dea1dd5
 HarfBuzz 15.1.0, source SHA-256 0fc7c565443a5f4be7da65ac5ee5bd737d9b158dc908708b7689a0a5796b0c8d
-FriBidi 1.0.18, source SHA-256 1de5e8073d035388b71d0b2d452b1da1f8caeea8a7702997b401fe1b6250727f: libfribidi.so, a library of its own that libass.so names
+FriBidi 1.0.18, source SHA-256 1de5e8073d035388b71d0b2d452b1da1f8caeea8a7702997b401fe1b6250727f: libceau_fribidi.so, a library of its own that libass.so names
 Not built for Android: dav1d, libxml2
-Patches: ffmpeg/0001-0019 (as on Apple's systems) and android/ffmpeg-android/0001-0007; freetype/0001-0002; libass/0001 and android/libass-android/0001-0002
+Patches: ffmpeg/0001-0019 (as on Apple's systems) and android/ffmpeg-android/0001-0010; freetype/0001-0002; libass/0001 and android/libass-android/0001-0002
 FFmpeg is configured without --enable-gpl and without --enable-nonfree, with --enable-jni --enable-mediacodec --enable-openssl; every option is in android/Scripts/build-engine-libs.sh
 Licences: LGPL version 2.1 or later (FFmpeg, FriBidi), Apache 2.0 (OpenSSL), ISC (libass), FTL (FreeType), MIT (HarfBuzz)
 Built with the Android NDK r30 for Android 9 (API level 28) and later, every segment aligned to 16 KB; the libraries carry their debug information
-Build script: android/Scripts/build-engine-libs.sh, a copy of the one in the app's repository as of 2026-11-19 (commit cb5ddb1); android/Scripts/prepare-sources.sh lays this repository's archives and patches out for it
+Build script: android/Scripts/build-engine-libs.sh, the Android app's build script, including its app-specific FriBidi SONAME; android/Scripts/prepare-sources.sh lays this repository's archives and patches out for it
 Checked 2026-11-23, with ffmpeg/0019: arm64-v8a built again from this repository alone exports the same symbols as the libraries the app packs (all eight) and carries the same patches; libfribidi.so has the same code (.text); in libavutil, libswresample, libswscale and libavcodec the instructions are the same, one for one, at addresses a few bytes apart, because the source paths written into the read-only data differ in length (the folder each was built in); libavformat, libavfilter and libass were compared by their symbols only. On 2026-11-17 the code (.text) was found the same in every library

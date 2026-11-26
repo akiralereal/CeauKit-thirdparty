@@ -183,7 +183,7 @@ Ceau for Android packs, for each ABI it ships (arm64-v8a, armeabi-v7a,
 x86_64), these shared libraries: `libavutil.so`, `libswresample.so`,
 `libswscale.so`, `libavcodec.so`, `libavformat.so` and `libavfilter.so`
 (FFmpeg), `libass.so` (libass, with FreeType and HarfBuzz linked into it) and
-`libfribidi.so` (FriBidi, a library of its own, so that it can be exchanged
+`libceau_fribidi.so` (FriBidi, a library of its own, so that it can be exchanged
 like FFmpeg's). They are built from the same archives as above with the same
 patches (`0019` from the first build after 2026-11-23; which ones the
 current build has is in `BUILD-INFO/Android.txt`), and these differences:
@@ -208,6 +208,9 @@ current build has is in `BUILD-INFO/Android.txt`), and these differences:
 | `ffmpeg-android/0005-mediacodec-a-running-decoder-can-be-handed-another-surface` | A running decoder can be handed another surface. |
 | `ffmpeg-android/0006-mediacodec-a-decoder-that-is-draining-says-a-picture-or-the-end` | A decoder that is draining says a picture or the end. |
 | `ffmpeg-android/0007-mediacodec-a-buffer-let-go-of-after-its-decoder-closed-logs-with-no-context` | A buffer let go of after its decoder closed logs with no context (a crash once its context was freed). |
+| `ffmpeg-android/0008-mediacodec-a-stalled-decoder-s-two-seconds-are-read-off-the-clock` | Track decoder stall time using the clock. |
+| `ffmpeg-android/0009-mediacodec-the-decoder-is-told-how-large-a-picture-s-packet-may-be` | Specify the maximum expected packet size for MediaCodec. |
+| `ffmpeg-android/0010-mediacodec-allow-hevc-with-in-band-parameter-sets` | Allow HEVC live streams to supply parameter sets after the hardware decoder opens. |
 | `libass-android/0001-fontselect-android-s-fonts-for-the-letters-no-other-font-has` | A font provider of Android's: a letter the chosen font lacks is drawn in the system's font that has it. |
 | `libass-android/0002-fontselect-android-s-list-of-its-fonts-where-it-has-no-font-matcher` | On Android 9, which has no font matcher, the provider goes by the system's own list of its fonts (`/system/etc/fonts.xml`). |
 

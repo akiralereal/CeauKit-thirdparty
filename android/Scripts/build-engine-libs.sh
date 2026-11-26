@@ -28,7 +28,7 @@
 #   lib/libass.so                          libass, with FreeType and HarfBuzz
 #                                           (FTL and MIT, not LGPL) linked into it,
 #                                           and a font provider of Android's
-#   lib/libfribidi.so                      FriBidi, LGPL 2.1, a library of its
+#   lib/libceau_fribidi.so                      FriBidi, LGPL 2.1, a library of its
 #                                           own that libass.so names as NEEDED,
 #                                           so that it can be replaced
 #   include/                               their headers
@@ -297,8 +297,10 @@ build() {
     # What the libraries were made as: raised when the way they are split into
     # files changes, and with libass's patches, so that an older build is made
     # again.
-    local layout="libass-fribidi-shared-1 android-patches-$libass_android_patches_id"
-    if [[ -f "$prefix/lib/libass.so" && -f "$prefix/lib/libfribidi.so" && "$(cat "$deps/done" 2>/dev/null)" == "$layout" ]]; then
+    # The previous layout left its unprefixed library in the reusable install folder.
+    rm -f "$prefix/lib/libfribidi.so"
+    local layout="libass-fribidi-shared-2 android-patches-$libass_android_patches_id"
+    if [[ -f "$prefix/lib/libass.so" && -f "$prefix/lib/libceau_fribidi.so" && "$(cat "$deps/done" 2>/dev/null)" == "$layout" ]]; then
         echo "reusing the finished build in ${out#"$ROOT"/}/libass-deps"
         return
     fi
@@ -354,11 +356,11 @@ build() {
     # A shared library of its own: FriBidi is LGPL 2.1, and a user can only
     # replace it as the licence asks if it is not part of another file. The
     # one in install/lib is what libass's configure and link find; the
-    # soname is what libass.so names as NEEDED.
-    "$cc" -shared -o "$deps/install/lib/libfribidi.so" -Wl,-soname,libfribidi.so $ldflags \
+    # private SONAME keeps the loader from reusing an older FriBidi supplied by a TV vendor.
+    "$cc" -shared -o "$deps/install/lib/libceau_fribidi.so" -Wl,-soname,libceau_fribidi.so $ldflags \
         -Wl,--no-undefined "${objects[@]}" > "$deps/fribidi/link.log" 2>&1 \
         || { tail -30 "$deps/fribidi/link.log"; die "FriBidi: link failed for $abi"; }
-    cp "$deps/install/lib/libfribidi.so" "$prefix/lib/libfribidi.so"
+    cp "$deps/install/lib/libceau_fribidi.so" "$prefix/lib/libceau_fribidi.so"
 
     # libass, with none of the font providers its configure knows: Android's
     # is compiled on its own below, since libass's Makefile.in does not know
@@ -370,7 +372,7 @@ build() {
         --disable-require-system-font-provider \
         CC="$cc" CFLAGS="$flags" "${target_tools[@]}" PKG_CONFIG=false \
         FREETYPE_CFLAGS="-I$deps/install/include/freetype2" FREETYPE_LIBS="-L$deps/install/lib -lfreetype -lz" \
-        FRIBIDI_CFLAGS="-I$deps/install/include/fribidi" FRIBIDI_LIBS="-L$deps/install/lib -lfribidi" \
+        FRIBIDI_CFLAGS="-I$deps/install/include/fribidi" FRIBIDI_LIBS="-L$deps/install/lib -lceau_fribidi" \
         HARFBUZZ_CFLAGS="-I$deps/install/include/harfbuzz" HARFBUZZ_LIBS="-L$deps/install/lib -lharfbuzz" \
         > configure.log 2>&1 || { tail -30 configure.log; die "libass: configure failed for $abi"; }
     make -j"$JOBS" > make.log 2>&1 || { tail -40 make.log; die "libass: make failed for $abi"; }
@@ -396,7 +398,7 @@ build() {
         "$deps/libass/ass_android.o" "$deps/libass/ass_android_fonts.o" \
         -Wl,--whole-archive "$deps/install/lib/libass.a" -Wl,--no-whole-archive \
         "$deps/install/lib/libharfbuzz.a" "$deps/install/lib/libfreetype.a" \
-        "$deps/install/lib/libfribidi.so" -landroid -lz -lm > "$deps/link.log" 2>&1 || { tail -30 "$deps/link.log"; die "libass: link failed for $abi"; }
+        "$deps/install/lib/libceau_fribidi.so" -landroid -lz -lm > "$deps/link.log" 2>&1 || { tail -30 "$deps/link.log"; die "libass: link failed for $abi"; }
     rm -rf "$prefix/include/ass" && cp -R "$deps/install/include/ass" "$prefix/include/ass"
     echo "$layout" > "$deps/done"
 }
