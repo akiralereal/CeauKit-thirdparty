@@ -254,6 +254,10 @@ build() {
         --pkg-config=false
         --enable-pic --enable-shared --disable-static
         --disable-programs --disable-doc --enable-debug
+        # Installed with their symbols: Gradle strips what goes into an APK
+        # and keeps the symbols for Play's crash reports (README, "Release
+        # builds"). Stripped at install, they would be gone for good.
+        --disable-stripping
         --disable-avdevice --disable-encoders --disable-muxers
         --disable-autodetect --enable-pthreads
         --enable-zlib --enable-iconv --enable-jni --enable-mediacodec
