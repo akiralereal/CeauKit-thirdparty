@@ -298,24 +298,54 @@ current build is in
 
 Each version of Ceau that ships with these libraries gets a tag here, named
 `ceau-` and the version number the App Store and the app itself show: the
-source of the libraries in Ceau 3.0.0 is the tag `ceau-3.0.0`. The tag is on
-the commit whose patches, build scripts and build information are those of
-the libraries in that version. It is made when that version is released, is
-never moved, and stays as long as that version is distributed.
+source of the libraries in Ceau 3.0.0 is the tag `ceau-3.0.0`. Each version
+of Ceau for Windows gets one named `ceau-windows-` and its version number,
+and each version of Ceau for Android one named `ceau-android-` and its
+version number. The China edition of Ceau for Android is numbered on its
+own, and its versions are tagged `ceau-android-cn-` and the version number.
 
-| Version of Ceau | Tag | Released |
+A tag is on the first commit whose patches, build scripts and build
+information are those of the libraries in that version, so versions that
+carry the same libraries share a commit. It is made when that version is
+released, is never moved, and stays as long as that version is distributed.
+Where no commit of `main` held exactly what built a version, its tag is on a
+commit of its own beside `main`, whose message says how it differs; the tag
+is what keeps that commit.
+
+Ceau, on iPhone, iPad, Apple Watch, Mac, Apple TV and Apple Vision:
+
+| Version | Tag | Libraries |
 | --- | --- | --- |
-| 3.0.0 (build 25) | [`ceau-3.0.0`](https://github.com/akiralereal/CeauKit-thirdparty/tree/ceau-3.0.0) | November 2026 |
+| 3.0.0 (build 25) | [`ceau-3.0.0`](https://github.com/akiralereal/CeauKit-thirdparty/tree/ceau-3.0.0) | FFmpeg with patches 0001-0018 |
+| 3.1.0 (build 26) | [`ceau-3.1.0`](https://github.com/akiralereal/CeauKit-thirdparty/tree/ceau-3.1.0) | the same as 3.0.0 |
+| 3.2.0 (build 27) | [`ceau-3.2.0`](https://github.com/akiralereal/CeauKit-thirdparty/tree/ceau-3.2.0) | FFmpeg with patches 0001-0019 |
 
-Each version of Ceau for Android gets a tag of its own the same way, named
-`ceau-android-` and its version number, and each version of Ceau for Windows
-one named `ceau-windows-` and its version number. None of either has been
-released yet.
+Ceau for Windows, from the Microsoft Store (1.0.1 was built and never
+released):
+
+| Version | Tag | Libraries |
+| --- | --- | --- |
+| 1.0.0 (MSIX 1.0.0.0) | [`ceau-windows-1.0.0`](https://github.com/akiralereal/CeauKit-thirdparty/tree/ceau-windows-1.0.0) | FFmpeg with patches 0001-0018 |
+| 1.1.0 (MSIX 1.1.0.0) | [`ceau-windows-1.1.0`](https://github.com/akiralereal/CeauKit-thirdparty/tree/ceau-windows-1.1.0) | the same as 1.0.0 |
+| 1.2.0 (MSIX 1.2.0.0) | [`ceau-windows-1.2.0`](https://github.com/akiralereal/CeauKit-thirdparty/tree/ceau-windows-1.2.0) | the same as 1.0.0 |
+| 1.3.0 (MSIX 1.3.0.0) | [`ceau-windows-1.3.0`](https://github.com/akiralereal/CeauKit-thirdparty/tree/ceau-windows-1.3.0) | FFmpeg with patches 0001-0019 |
+
+Ceau for Android has not been released on Google Play yet; its test builds
+there have no tags. The China edition of Ceau for Android:
+
+| Version | Tag | Libraries |
+| --- | --- | --- |
+| 0.3 (build 30) | [`ceau-android-cn-0.3`](https://github.com/akiralereal/CeauKit-thirdparty/tree/ceau-android-cn-0.3) | for API level 30, FFmpeg with patches 0001-0018; on a commit beside `main` |
+| 0.4 (build 40) | [`ceau-android-cn-0.4`](https://github.com/akiralereal/CeauKit-thirdparty/tree/ceau-android-cn-0.4) | the same as 0.3 |
+| 0.5 (build 50) | [`ceau-android-cn-0.5`](https://github.com/akiralereal/CeauKit-thirdparty/tree/ceau-android-cn-0.5) | for API level 28, FFmpeg with patches 0001-0018; on a commit beside `main` |
+| 0.6 (build 60) | [`ceau-android-cn-0.6`](https://github.com/akiralereal/CeauKit-thirdparty/tree/ceau-android-cn-0.6) | the same as 0.5 |
+| 0.7 (build 70) | [`ceau-android-cn-0.7`](https://github.com/akiralereal/CeauKit-thirdparty/tree/ceau-android-cn-0.7) | for API level 28, FFmpeg with patches 0001-0019 |
+| 0.8 (build 80) | [`ceau-android-cn-0.8`](https://github.com/akiralereal/CeauKit-thirdparty/tree/ceau-android-cn-0.8) | the same as 0.7 |
 
 To build the libraries of a released version, check out its tag:
 
 ```bash
-git checkout ceau-3.0.0
+git checkout ceau-3.2.0
 ```
 
 The `main` branch holds what the current development builds of CeauKit are
