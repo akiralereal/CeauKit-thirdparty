@@ -344,6 +344,7 @@ there have no tags. The China edition of Ceau for Android:
 | 0.6 (build 60) | [`ceau-android-cn-0.6`](https://github.com/akiralereal/CeauKit-thirdparty/tree/ceau-android-cn-0.6) | the same as 0.5 |
 | 0.7 (build 70) | [`ceau-android-cn-0.7`](https://github.com/akiralereal/CeauKit-thirdparty/tree/ceau-android-cn-0.7) | for API level 28, FFmpeg with patches 0001-0019 |
 | 0.8 (build 80) | [`ceau-android-cn-0.8`](https://github.com/akiralereal/CeauKit-thirdparty/tree/ceau-android-cn-0.8) | the same as 0.7 |
+| 0.9 (build 100) | [`ceau-android-cn-0.9`](https://github.com/akiralereal/CeauKit-thirdparty/tree/ceau-android-cn-0.9) | Android FFmpeg patches 0001–0010 and application-specific FriBidi SONAME at [`61bd410`](https://github.com/akiralereal/CeauKit-thirdparty/commit/61bd4104b391f6dd955b6104a269049d901e0ef3) |
 
 To build the libraries of a released version, check out its tag:
 
