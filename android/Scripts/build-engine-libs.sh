@@ -9,7 +9,7 @@
 # x86_64 needs nasm (FFmpeg's x86 assembly; Homebrew's, `brew install nasm`):
 # without it the build stops rather than configure FFmpeg without assembly.
 # armeabi-v7a is built for ARMv7-A with NEON and Thumb-2, the baseline of
-# every 32-bit Android that runs API 30 and later.
+# every 32-bit Android that runs API 28 and later.
 #
 # The sources are the ones CeauKit's own scripts fetched and patched, in
 # ../CeauKit/Vendor/build/src: run its Scripts/build-ffmpeg.sh and
@@ -41,7 +41,9 @@
 # the font a line falls back on itself, and Patches/libass-android gives
 # libass a provider that asks Android, through the NDK's AFontMatcher, for a
 # font for each letter that one lacks (Arabic, Hebrew, Thai, the scripts of
-# India). It is applied to a copy of CeauKit's libass, as FFmpeg's are.
+# India). AFontMatcher came with Android 10: on Android 9 the provider reads
+# the system's own list of its fonts instead. It is applied to a copy of
+# CeauKit's libass, as FFmpeg's are.
 #
 # https goes through OpenSSL in place of Secure Transport, built here from
 # its release (fetched once into build/downloads, held to the SHA-256 below).
@@ -58,14 +60,14 @@
 # Needed: the Android NDK. It is looked for where CeauKit's
 # Scripts/check-android.sh looks (~/Library/Developer/CeauKitAndroidCheck),
 # or ANDROID_NDK_HOME says. ANDROID_API is the oldest Android the libraries
-# run on (30, Android 11, the app's minimum, if not said); JOBS the compile
+# run on (28, Android 9, the app's minimum, if not said); JOBS the compile
 # jobs at a time.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CEAUKIT="${CEAUKIT:-$(cd "$ROOT/../CeauKit" 2>/dev/null && pwd || true)}"
 TOOLS="${CEAUKIT_ANDROID_TOOLS:-$HOME/Library/Developer/CeauKitAndroidCheck}"
-API="${ANDROID_API:-30}"
+API="${ANDROID_API:-28}"
 JOBS="${JOBS:-$(sysctl -n hw.ncpu)}"
 
 log() { printf '\n==> %s\n' "$*"; }
@@ -134,7 +136,11 @@ ANDROID_LIBASS_SOURCE="$ROOT/build/src/$(basename "$LIBASS_SOURCE")-android"
 if [[ "$(cat "$ANDROID_LIBASS_SOURCE/.ceau-android-patches" 2>/dev/null)" != "$libass_android_patches_id" ]]; then
     log "libass's source for Android, in ${ANDROID_LIBASS_SOURCE#"$ROOT"/}"
     rm -rf "$ANDROID_LIBASS_SOURCE" && mkdir -p "$(dirname "$ANDROID_LIBASS_SOURCE")"
-    cp -R "$LIBASS_SOURCE" "$ANDROID_LIBASS_SOURCE"
+    # With the files' times as they were: a copy stamps each file with the
+    # moment it was copied, and when that put configure a second before
+    # aclocal.m4, make set out to write configure again with an autoconf
+    # this Mac does not have.
+    cp -pR "$LIBASS_SOURCE" "$ANDROID_LIBASS_SOURCE"
     for patch in "$ROOT"/Patches/libass-android/*.patch; do
         [[ -f "$patch" ]] || continue
         echo "applying $(basename "$patch")"
@@ -254,6 +260,10 @@ build() {
         --pkg-config=false
         --enable-pic --enable-shared --disable-static
         --disable-programs --disable-doc --enable-debug
+        # Installed with their symbols: Gradle strips what goes into an APK
+        # and keeps the symbols for Play's crash reports (README, "Release
+        # builds"). Stripped at install, they would be gone for good.
+        --disable-stripping
         --disable-avdevice --disable-encoders --disable-muxers
         --disable-autodetect --enable-pthreads
         --enable-zlib --enable-iconv --enable-jni --enable-mediacodec
@@ -365,16 +375,25 @@ build() {
         > configure.log 2>&1 || { tail -30 configure.log; die "libass: configure failed for $abi"; }
     make -j"$JOBS" > make.log 2>&1 || { tail -40 make.log; die "libass: make failed for $abi"; }
     make install > install.log 2>&1 || { tail -20 install.log; die "libass: make install failed for $abi"; }
-    # shellcheck disable=SC2086
-    $cc $flags -DHAVE_CONFIG_H -I"$deps/libass" -I"$ANDROID_LIBASS_SOURCE" -I"$ANDROID_LIBASS_SOURCE/libass" \
-        -I"$deps/install/include/freetype2" -I"$deps/install/include/harfbuzz" -I"$deps/install/include/fribidi" \
-        -Wall -Werror -c "$ANDROID_LIBASS_SOURCE/libass/ass_android.c" -o "$deps/libass/ass_android.o" \
-        > "$deps/libass/android.log" 2>&1 || { tail -30 "$deps/libass/android.log"; die "libass: Android's font provider failed to compile for $abi"; }
+    # The provider calls AFontMatcher, which Android has from 10 (API 29),
+    # as weak references behind a check of the system's version: a call
+    # with no check before it stops the build here, where it would otherwise
+    # be a call of a null address on Android 9.
+    local android_file
+    : > "$deps/libass/android.log"
+    for android_file in ass_android ass_android_fonts; do
+        # shellcheck disable=SC2086
+        $cc $flags -DHAVE_CONFIG_H -I"$deps/libass" -I"$ANDROID_LIBASS_SOURCE" -I"$ANDROID_LIBASS_SOURCE/libass" \
+            -I"$deps/install/include/freetype2" -I"$deps/install/include/harfbuzz" -I"$deps/install/include/fribidi" \
+            -Wall -Werror -Werror=unguarded-availability \
+            -c "$ANDROID_LIBASS_SOURCE/libass/$android_file.c" -o "$deps/libass/$android_file.o" \
+            >> "$deps/libass/android.log" 2>&1 || { tail -30 "$deps/libass/android.log"; die "libass: Android's font provider failed to compile for $abi"; }
+    done
 
     # libass with FreeType, HarfBuzz and Android's font provider in it, and
     # FriBidi named, not in it. libandroid is the system's (AFontMatcher).
     "$cc" -shared -o "$prefix/lib/libass.so" -Wl,-soname,libass.so $ldflags \
-        "$deps/libass/ass_android.o" \
+        "$deps/libass/ass_android.o" "$deps/libass/ass_android_fonts.o" \
         -Wl,--whole-archive "$deps/install/lib/libass.a" -Wl,--no-whole-archive \
         "$deps/install/lib/libharfbuzz.a" "$deps/install/lib/libfreetype.a" \
         "$deps/install/lib/libfribidi.so" -landroid -lz -lm > "$deps/link.log" 2>&1 || { tail -30 "$deps/link.log"; die "libass: link failed for $abi"; }
